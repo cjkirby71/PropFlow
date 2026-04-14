@@ -28,16 +28,23 @@ Build a CRM (similar to FollowUpBoss) for Residential Leasing and Commercial Sal
 ## What's Been Implemented (2026-04-14)
 - Full JWT auth (login, register, logout, refresh, admin seeding)
 - Contact CRUD with search, filtering, tags
+- **CSV import/export** for bulk contact management
 - Deal pipeline with 3 types: Residential Lease, Commercial Sale, Commercial Lease
 - Drag-and-drop kanban board (@hello-pangea/dnd)
+- **Deal stage automation** - auto-creates tasks when deals move stages
 - Property listings CRUD
 - Task management with priorities and due dates
+- **Calendar view** for tasks with monthly grid and date selection
 - Activity logging on contacts
 - AI email drafting (GPT-5.2)
 - AI lead scoring (GPT-5.2)
+- **SendGrid email integration** (send directly from CRM, sender: craig@respaceteam.com)
+- **Twilio SMS integration** (text leads from contact detail pages)
 - API key management for MaxClaw agent
+- **Webhook notifications** (real-time alerts on new leads, deal changes, emails/SMS)
+- **Team management** with role-based access (admin/agent), invites
 - Dashboard with stats, charts (Recharts)
-- Settings page with API documentation
+- Settings page with 4 tabs: API Keys, Team, Webhooks, Integrations
 
 ## Pipeline Stages
 - **Residential Lease**: New Lead → Contacted → Showing → Application → Lease Signed → Closed
@@ -47,18 +54,18 @@ Build a CRM (similar to FollowUpBoss) for Residential Leasing and Commercial Sal
 ## Prioritized Backlog
 ### P0 (Implemented)
 - Auth, Contacts, Deals, Pipeline, Properties, Tasks, Activities, AI, API Keys, Dashboard
+- CSV Import/Export, Email (SendGrid), SMS (Twilio), Calendar, Deal Automation, Team, Webhooks
 
-### P1 (Next)
-- Bulk import/export contacts (CSV)
-- Email integration (send emails directly from CRM)
-- Calendar view for tasks
-- Deal stage automation (auto-create tasks when deal moves to new stage)
-- Contact merge/dedup
+### P1 (Next - Requires User API Keys)
+- Configure SendGrid API key for live email sending
+- Configure Twilio credentials for live SMS
+- Contact merge/dedup tool
+- Email templates (saved drafts)
+- Bulk deal creation
 
 ### P2 (Future)
-- Team/multi-user support
-- Role-based access control
-- Reporting/analytics export
-- Webhook integration for real-time notifications
-- Mobile-responsive improvements
+- Advanced reporting/analytics export
+- Multi-team organization support
 - Document storage per deal/contact
+- Mobile-responsive improvements
+- Webhook retry logic and delivery monitoring
