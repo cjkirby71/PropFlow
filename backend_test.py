@@ -17,6 +17,8 @@ class PropFlowAPITester:
         self.task_id = None
         self.api_key = None
         self.webhook_id = None
+        self.email_template_id = None
+        self.sms_template_id = None
 
     def run_test(self, name, method, endpoint, expected_status, data=None, headers=None):
         """Run a single API test"""
@@ -466,6 +468,174 @@ class PropFlowAPITester:
             print(f"   Correctly returned 503 - Twilio not configured")
         return success
 
+    # ─── Templates Testing ───
+    def test_create_email_template(self):
+        """Test creating an email template"""
+        template_data = {
+            "name": "Test Email Template",
+            "category": "email",
+            "subject": "Follow-up: Your Property Search",
+            "body": "Hi {contact_name},\n\nI wanted to follow up on your property search. Please let me know if you have any questions.\n\nBest regards,\n{agent_name}",
+            "tags": ["follow-up", "email"]
+        }
+        success, response = self.run_test(
+            "Create Email Template",
+            "POST",
+            "templates",
+            200,
+            data=template_data
+        )
+        if success:
+            self.email_template_id = response.get('id')
+            print(f"   Created email template ID: {self.email_template_id}")
+        return success
+
+    def test_create_sms_template(self):
+        """Test creating an SMS template"""
+        template_data = {
+            "name": "Test SMS Template",
+            "category": "sms",
+            "body": "Hi {contact_name}, just checking in about your property search. Call me at 555-0123 if you have questions!",
+            "tags": ["follow-up", "sms"]
+        }
+        success, response = self.run_test(
+            "Create SMS Template",
+            "POST",
+            "templates",
+            200,
+            data=template_data
+        )
+        if success:
+            self.sms_template_id = response.get('id')
+            print(f"   Created SMS template ID: {self.sms_template_id}")
+        return success
+
+    def test_list_templates(self):
+        """Test listing all templates"""
+        success, response = self.run_test(
+            "List All Templates",
+            "GET",
+            "templates",
+            200
+        )
+        if success:
+            print(f"   Found {len(response)} templates")
+        return success
+
+    def test_filter_email_templates(self):
+        """Test filtering templates by email category"""
+        success, response = self.run_test(
+            "Filter Email Templates",
+            "GET",
+            "templates?category=email",
+            200
+        )
+        if success:
+            print(f"   Found {len(response)} email templates")
+        return success
+
+    def test_filter_sms_templates(self):
+        """Test filtering templates by SMS category"""
+        success, response = self.run_test(
+            "Filter SMS Templates",
+            "GET",
+            "templates?category=sms",
+            200
+        )
+        if success:
+            print(f"   Found {len(response)} SMS templates")
+        return success
+
+    def test_get_template(self):
+        """Test getting a specific template"""
+        if not hasattr(self, 'email_template_id') or not self.email_template_id:
+            print("❌ Skipped - No email template ID available")
+            return False
+        
+        success, response = self.run_test(
+            f"Get Template {self.email_template_id}",
+            "GET",
+            f"templates/{self.email_template_id}",
+            200
+        )
+        if success:
+            print(f"   Retrieved template: {response.get('name', 'Unknown')}")
+        return success
+
+    def test_update_template(self):
+        """Test updating a template"""
+        if not hasattr(self, 'email_template_id') or not self.email_template_id:
+            print("❌ Skipped - No email template ID available")
+            return False
+        
+        update_data = {
+            "name": "Updated Test Template",
+            "category": "email",
+            "subject": "Updated Subject",
+            "body": "Updated body content with {contact_name}",
+            "tags": ["updated", "test"]
+        }
+        success, response = self.run_test(
+            f"Update Template {self.email_template_id}",
+            "PUT",
+            f"templates/{self.email_template_id}",
+            200,
+            data=update_data
+        )
+        if success:
+            print(f"   Updated template: {response.get('name', 'Unknown')}")
+        return success
+
+    def test_use_template(self):
+        """Test incrementing template use count"""
+        if not hasattr(self, 'email_template_id') or not self.email_template_id:
+            print("❌ Skipped - No email template ID available")
+            return False
+        
+        success, response = self.run_test(
+            f"Use Template {self.email_template_id}",
+            "POST",
+            f"templates/{self.email_template_id}/use",
+            200
+        )
+        if success:
+            print(f"   Template use count: {response.get('use_count', 0)}")
+        return success
+
+    def test_ai_generate_template(self):
+        """Test AI template generation"""
+        ai_data = {
+            "purpose": "follow-up",
+            "category": "email",
+            "property_type": "residential_lease"
+        }
+        success, response = self.run_test(
+            "AI Generate Template",
+            "POST",
+            "templates/ai-generate",
+            200,
+            data=ai_data
+        )
+        if success:
+            print(f"   Generated template body length: {len(response.get('body', ''))}")
+        return success
+
+    def test_delete_template(self):
+        """Test deleting a template"""
+        if not hasattr(self, 'email_template_id') or not self.email_template_id:
+            print("❌ Skipped - No email template ID available")
+            return False
+        
+        success, response = self.run_test(
+            f"Delete Template {self.email_template_id}",
+            "DELETE",
+            f"templates/{self.email_template_id}",
+            200
+        )
+        if success:
+            print(f"   Deleted template successfully")
+        return success
+
     def test_create_webhook(self):
         """Test creating a webhook"""
         webhook_data = {
@@ -608,7 +778,20 @@ def main():
     tester.test_invite_team_member()
     tester.test_list_team_members()
     
-    # NEW FEATURE 7: Webhooks
+    # NEW FEATURE 7: Templates
+    print("\n📝 Templates:")
+    tester.test_create_email_template()
+    tester.test_create_sms_template()
+    tester.test_list_templates()
+    tester.test_filter_email_templates()
+    tester.test_filter_sms_templates()
+    tester.test_get_template()
+    tester.test_update_template()
+    tester.test_use_template()
+    tester.test_ai_generate_template()
+    tester.test_delete_template()
+    
+    # NEW FEATURE 8: Webhooks
     print("\n🔗 Webhooks:")
     tester.test_create_webhook()
     tester.test_list_webhooks()

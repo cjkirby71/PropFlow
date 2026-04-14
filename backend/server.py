@@ -207,6 +207,13 @@ class TeamInviteRequest(BaseModel):
     name: str
     role: Optional[str] = "agent"
 
+class TemplateCreate(BaseModel):
+    name: str
+    category: str  # email, sms
+    subject: Optional[str] = ""
+    body: str
+    tags: Optional[List[str]] = []
+
 # ─── Stage Automation Config ───
 STAGE_AUTO_TASKS = {
     "Contacted": {"title": "Follow up within 24 hours", "priority": "high", "days_offset": 1},
@@ -723,6 +730,93 @@ async def import_contacts_csv(file: UploadFile = File(...), user=Depends(get_any
             errors_list.append(f"Row {i+1}: {str(e)}")
     return {"imported": imported, "errors": errors_list}
 
+# ─── Message Templates ───
+@api_router.post("/templates")
+async def create_template(data: TemplateCreate, user=Depends(get_current_user)):
+    doc = data.model_dump()
+    doc["user_id"] = user["_id"]
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+    doc["use_count"] = 0
+    result = await db.templates.insert_one(doc)
+    doc["id"] = str(result.inserted_id)
+    del doc["_id"]
+    return doc
+
+@api_router.get("/templates")
+async def list_templates(user=Depends(get_any_auth_user), category: str = ""):
+    query = {"user_id": user["_id"]}
+    if category:
+        query["category"] = category
+    templates = await db.templates.find(query).sort("use_count", -1).to_list(200)
+    return [serialize_doc(t) for t in templates]
+
+@api_router.get("/templates/{template_id}")
+async def get_template(template_id: str, user=Depends(get_any_auth_user)):
+    tpl = await db.templates.find_one({"_id": ObjectId(template_id), "user_id": user["_id"]})
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return serialize_doc(tpl)
+
+@api_router.put("/templates/{template_id}")
+async def update_template(template_id: str, data: TemplateCreate, user=Depends(get_current_user)):
+    updates = data.model_dump()
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    result = await db.templates.update_one({"_id": ObjectId(template_id), "user_id": user["_id"]}, {"$set": updates})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Template not found")
+    tpl = await db.templates.find_one({"_id": ObjectId(template_id)})
+    return serialize_doc(tpl)
+
+@api_router.delete("/templates/{template_id}")
+async def delete_template(template_id: str, user=Depends(get_current_user)):
+    result = await db.templates.delete_one({"_id": ObjectId(template_id), "user_id": user["_id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return {"message": "Template deleted"}
+
+@api_router.post("/templates/{template_id}/use")
+async def use_template(template_id: str, user=Depends(get_any_auth_user)):
+    """Increment use count and return the template - for tracking popular templates"""
+    tpl = await db.templates.find_one({"_id": ObjectId(template_id), "user_id": user["_id"]})
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+    await db.templates.update_one({"_id": ObjectId(template_id)}, {"$inc": {"use_count": 1}})
+    tpl["use_count"] = tpl.get("use_count", 0) + 1
+    return serialize_doc(tpl)
+
+@api_router.post("/templates/ai-generate")
+async def ai_generate_template(request: Request, user=Depends(get_current_user)):
+    body = await request.json()
+    purpose = body.get("purpose", "follow-up")
+    category = body.get("category", "email")
+    property_type = body.get("property_type", "residential_lease")
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        system = f"""You are an expert real estate copywriter. Generate a {category} template for {purpose}.
+Property type context: {property_type}
+Use placeholders like {{contact_name}}, {{property_address}}, {{agent_name}}, {{company_name}} for personalization.
+{"Include a Subject line on the first line." if category == "email" else "Keep it under 160 characters for SMS."}
+Make it professional, warm, and action-oriented."""
+        chat = LlmChat(
+            api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
+            session_id=f"template-gen-{datetime.now(timezone.utc).isoformat()}",
+            system_message=system
+        ).with_model("openai", "gpt-5.2")
+        result = await chat.send_message(UserMessage(text=f"Generate the {category} template now for: {purpose}"))
+        subject = ""
+        template_body = result
+        if category == "email":
+            for line in result.split("\n"):
+                if line.lower().startswith("subject:"):
+                    subject = line.replace("Subject:", "").replace("subject:", "").strip()
+                    template_body = result.replace(line, "").strip()
+                    break
+        return {"subject": subject, "body": template_body, "category": category}
+    except Exception as e:
+        logger.error(f"AI template generation error: {e}")
+        raise HTTPException(status_code=500, detail=f"AI service error: {str(e)}")
+
 # ─── Email Sending (SendGrid) ───
 @api_router.post("/email/send")
 async def send_email_endpoint(data: SendEmailRequest, background_tasks: BackgroundTasks, user=Depends(get_any_auth_user)):
@@ -935,6 +1029,7 @@ async def startup():
     await db.activities.create_index([("user_id", 1), ("contact_id", 1)])
     await db.api_keys.create_index("key", unique=True)
     await db.webhooks.create_index("user_id")
+    await db.templates.create_index("user_id")
     # Seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@propflow.com")
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")

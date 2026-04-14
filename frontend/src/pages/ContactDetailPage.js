@@ -28,6 +28,8 @@ export default function ContactDetailPage() {
   const [smsForm, setSmsForm] = useState({ message: '' });
   const [sendingEmail, setSendingEmail] = useState(false);
   const [sendingSMS, setSendingSMS] = useState(false);
+  const [emailTemplates, setEmailTemplates] = useState([]);
+  const [smsTemplates, setSmsTemplates] = useState([]);
   const [emailLoading, setEmailLoading] = useState(false);
   const [scoreLoading, setScoreLoading] = useState(false);
 
@@ -36,10 +38,14 @@ export default function ContactDetailPage() {
       api.get(`/contacts/${id}`),
       api.get('/activities', { params: { contact_id: id } }),
       api.get('/deals'),
-    ]).then(([c, a, d]) => {
+      api.get('/templates', { params: { category: 'email' } }),
+      api.get('/templates', { params: { category: 'sms' } }),
+    ]).then(([c, a, d, et, st]) => {
       setContact(c.data);
       setActivities(a.data);
       setDeals(d.data.filter(deal => deal.contact_id === id));
+      setEmailTemplates(et.data);
+      setSmsTemplates(st.data);
       setLoading(false);
     }).catch(() => { navigate('/contacts'); });
   }, [id, navigate]);
@@ -116,6 +122,21 @@ export default function ContactDetailPage() {
       alert('AI draft failed: ' + (err.response?.data?.detail || err.message));
     }
     setEmailLoading(false);
+  };
+
+  const applyTemplate = (tpl, type) => {
+    const replace = (text) => text
+      .replace(/\{contact_name\}/g, contact?.name || '')
+      .replace(/\{agent_name\}/g, 'Craig')
+      .replace(/\{company_name\}/g, 'RE/SPACE Team')
+      .replace(/\{property_address\}/g, '');
+    if (type === 'email') {
+      setEmailForm({ subject: replace(tpl.subject || ''), body: replace(tpl.body) });
+      api.post(`/templates/${tpl.id}/use`).catch(() => {});
+    } else {
+      setSmsForm({ message: replace(tpl.body) });
+      api.post(`/templates/${tpl.id}/use`).catch(() => {});
+    }
   };
 
   if (loading) return <div className="p-6"><div className="animate-pulse space-y-4"><div className="h-8 bg-slate-200 rounded w-48" /><div className="h-40 bg-slate-200 rounded-lg" /></div></div>;
@@ -242,6 +263,17 @@ export default function ContactDetailPage() {
         <DialogContent className="sm:max-w-lg" data-testid="send-email-dialog">
           <DialogHeader><DialogTitle className="flex items-center gap-2"><Send className="w-4 h-4 text-blue-500" /> Send Email</DialogTitle></DialogHeader>
           <div className="space-y-3">
+            {emailTemplates.length > 0 && (
+              <div>
+                <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Use Template</Label>
+                <Select onValueChange={v => { const t = emailTemplates.find(t => t.id === v); if (t) applyTemplate(t, 'email'); }}>
+                  <SelectTrigger className="bg-white" data-testid="email-template-select"><SelectValue placeholder="Select a template..." /></SelectTrigger>
+                  <SelectContent>
+                    {emailTemplates.map(t => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
             <div>
               <Label className="text-sm font-medium text-slate-700 mb-1.5 block">To</Label>
               <Input value={contact?.email || ''} disabled className="bg-slate-50" />
@@ -269,6 +301,17 @@ export default function ContactDetailPage() {
         <DialogContent className="sm:max-w-md" data-testid="send-sms-dialog">
           <DialogHeader><DialogTitle className="flex items-center gap-2"><MessageCircle className="w-4 h-4 text-green-500" /> Send SMS</DialogTitle></DialogHeader>
           <div className="space-y-3">
+            {smsTemplates.length > 0 && (
+              <div>
+                <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Use Template</Label>
+                <Select onValueChange={v => { const t = smsTemplates.find(t => t.id === v); if (t) applyTemplate(t, 'sms'); }}>
+                  <SelectTrigger className="bg-white" data-testid="sms-template-select"><SelectValue placeholder="Select a template..." /></SelectTrigger>
+                  <SelectContent>
+                    {smsTemplates.map(t => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
             <div>
               <Label className="text-sm font-medium text-slate-700 mb-1.5 block">To</Label>
               <Input value={contact?.phone || ''} disabled className="bg-slate-50" />
