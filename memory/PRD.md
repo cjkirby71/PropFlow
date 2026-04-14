@@ -45,6 +45,8 @@ Build a CRM (similar to FollowUpBoss) for Residential Leasing and Commercial Sal
 - **Team management** with role-based access (admin/agent), invites
 - Dashboard with stats, charts (Recharts)
 - Settings page with 4 tabs: API Keys, Team, Webhooks, Integrations
+- **Email/SMS Templates** with CRUD, AI generation, placeholder support, usage tracking
+- Template picker in Send Email and Send SMS dialogs on contact detail pages
 
 ## Pipeline Stages
 - **Residential Lease**: New Lead → Contacted → Showing → Application → Lease Signed → Closed
