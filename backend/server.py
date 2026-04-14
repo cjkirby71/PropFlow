@@ -1,88 +1,694 @@
-from fastapi import FastAPI, APIRouter
 from dotenv import load_dotenv
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
-from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
-import uuid
-from datetime import datetime, timezone
-
-
-ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+import bcrypt
+import jwt
+import secrets
+from pydantic import BaseModel, Field
+from typing import List, Optional
+from datetime import datetime, timezone, timedelta
+from bson import ObjectId
 
 # MongoDB connection
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Create the main app without a prefix
 app = FastAPI()
-
-# Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
+JWT_ALGORITHM = "HS256"
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
-    
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
+# ─── Password Hashing ───
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
-# Add your routes to the router instead of directly to app
-@api_router.get("/")
-async def root():
-    return {"message": "Hello World"}
+def verify_password(plain: str, hashed: str) -> bool:
+    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
-    
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
+def get_jwt_secret():
+    return os.environ["JWT_SECRET"]
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
-    
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
-    
-    return status_checks
+def create_access_token(user_id: str, email: str) -> str:
+    return jwt.encode({"sub": user_id, "email": email, "exp": datetime.now(timezone.utc) + timedelta(minutes=60), "type": "access"}, get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
-# Include the router in the main app
+def create_refresh_token(user_id: str) -> str:
+    return jwt.encode({"sub": user_id, "exp": datetime.now(timezone.utc) + timedelta(days=7), "type": "refresh"}, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
+def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
+    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=False, samesite="lax", max_age=3600, path="/")
+    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+
+async def get_current_user(request: Request) -> dict:
+    token = request.cookies.get("access_token")
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "access":
+            raise HTTPException(status_code=401, detail="Invalid token type")
+        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        user["_id"] = str(user["_id"])
+        user.pop("password_hash", None)
+        return user
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+# ─── API Key Auth for External Agents ───
+async def get_api_key_user(request: Request) -> dict:
+    api_key = request.headers.get("X-API-Key", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+    key_doc = await db.api_keys.find_one({"key": api_key, "active": True})
+    if not key_doc:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    user = await db.users.find_one({"_id": ObjectId(key_doc["user_id"])})
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    user["_id"] = str(user["_id"])
+    user.pop("password_hash", None)
+    await db.api_keys.update_one({"_id": key_doc["_id"]}, {"$set": {"last_used": datetime.now(timezone.utc).isoformat()}})
+    return user
+
+# Flexible auth: try JWT first, then API key
+async def get_any_auth_user(request: Request) -> dict:
+    try:
+        return await get_current_user(request)
+    except HTTPException:
+        return await get_api_key_user(request)
+
+# ─── Pydantic Models ───
+class RegisterInput(BaseModel):
+    email: str
+    password: str
+    name: str
+
+class LoginInput(BaseModel):
+    email: str
+    password: str
+
+class ContactCreate(BaseModel):
+    name: str
+    email: Optional[str] = ""
+    phone: Optional[str] = ""
+    company: Optional[str] = ""
+    source: Optional[str] = "manual"
+    tags: Optional[List[str]] = []
+    property_type: Optional[str] = "residential_lease"
+    notes: Optional[str] = ""
+    lead_score: Optional[int] = 0
+
+class ContactUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    company: Optional[str] = None
+    source: Optional[str] = None
+    tags: Optional[List[str]] = None
+    property_type: Optional[str] = None
+    notes: Optional[str] = None
+    lead_score: Optional[int] = None
+
+class PropertyCreate(BaseModel):
+    name: str
+    address: str
+    property_type: str  # residential, commercial
+    listing_type: str   # lease, sale
+    price: Optional[float] = 0
+    sqft: Optional[float] = 0
+    bedrooms: Optional[int] = 0
+    bathrooms: Optional[int] = 0
+    description: Optional[str] = ""
+    status: Optional[str] = "active"
+    image_url: Optional[str] = ""
+
+class DealCreate(BaseModel):
+    title: str
+    pipeline_type: str  # residential_lease, commercial_sale, commercial_lease
+    stage: str
+    contact_id: Optional[str] = ""
+    property_id: Optional[str] = ""
+    value: Optional[float] = 0
+    notes: Optional[str] = ""
+
+class DealUpdate(BaseModel):
+    title: Optional[str] = None
+    stage: Optional[str] = None
+    contact_id: Optional[str] = None
+    property_id: Optional[str] = None
+    value: Optional[float] = None
+    notes: Optional[str] = None
+
+class TaskCreate(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    due_date: Optional[str] = ""
+    contact_id: Optional[str] = ""
+    deal_id: Optional[str] = ""
+    priority: Optional[str] = "medium"
+    completed: Optional[bool] = False
+
+class ActivityCreate(BaseModel):
+    contact_id: str
+    activity_type: str  # call, email, note, meeting
+    description: str
+    deal_id: Optional[str] = ""
+
+class AIEmailRequest(BaseModel):
+    contact_id: str
+    context: Optional[str] = ""
+    tone: Optional[str] = "professional"
+
+class AILeadScoreRequest(BaseModel):
+    contact_id: str
+
+# ─── Pipeline Stage Definitions ───
+PIPELINE_STAGES = {
+    "residential_lease": ["New Lead", "Contacted", "Showing", "Application", "Lease Signed", "Closed"],
+    "commercial_sale": ["New Lead", "Contacted", "Tour", "LOI", "Due Diligence", "Closing", "Closed"],
+    "commercial_lease": ["New Lead", "Contacted", "Tour", "Proposal", "Negotiation", "Lease Signed", "Closed"],
+}
+
+# ─── Helper ───
+def serialize_doc(doc):
+    if doc and "_id" in doc:
+        doc["id"] = str(doc["_id"])
+        del doc["_id"]
+    return doc
+
+# ─── Auth Routes ───
+@api_router.post("/auth/register")
+async def register(data: RegisterInput, response: Response):
+    email = data.email.lower().strip()
+    existing = await db.users.find_one({"email": email})
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    user_doc = {
+        "email": email,
+        "password_hash": hash_password(data.password),
+        "name": data.name,
+        "role": "user",
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    result = await db.users.insert_one(user_doc)
+    user_id = str(result.inserted_id)
+    access = create_access_token(user_id, email)
+    refresh = create_refresh_token(user_id)
+    set_auth_cookies(response, access, refresh)
+    return {"id": user_id, "email": email, "name": data.name, "role": "user"}
+
+@api_router.post("/auth/login")
+async def login(data: LoginInput, request: Request, response: Response):
+    email = data.email.lower().strip()
+    ip = request.client.host if request.client else "unknown"
+    identifier = f"{ip}:{email}"
+    # Brute force check
+    attempts = await db.login_attempts.find_one({"identifier": identifier})
+    if attempts and attempts.get("count", 0) >= 5:
+        lockout_time = attempts.get("last_attempt", "")
+        if lockout_time:
+            last = datetime.fromisoformat(lockout_time)
+            if datetime.now(timezone.utc) - last < timedelta(minutes=15):
+                raise HTTPException(status_code=429, detail="Too many attempts. Try again in 15 minutes.")
+            else:
+                await db.login_attempts.delete_one({"identifier": identifier})
+    user = await db.users.find_one({"email": email})
+    if not user or not verify_password(data.password, user["password_hash"]):
+        await db.login_attempts.update_one(
+            {"identifier": identifier},
+            {"$inc": {"count": 1}, "$set": {"last_attempt": datetime.now(timezone.utc).isoformat()}},
+            upsert=True
+        )
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    await db.login_attempts.delete_one({"identifier": identifier})
+    user_id = str(user["_id"])
+    access = create_access_token(user_id, email)
+    refresh = create_refresh_token(user_id)
+    set_auth_cookies(response, access, refresh)
+    return {"id": user_id, "email": email, "name": user.get("name", ""), "role": user.get("role", "user")}
+
+@api_router.post("/auth/logout")
+async def logout(response: Response):
+    response.delete_cookie("access_token", path="/")
+    response.delete_cookie("refresh_token", path="/")
+    return {"message": "Logged out"}
+
+@api_router.get("/auth/me")
+async def get_me(user=Depends(get_current_user)):
+    return user
+
+@api_router.post("/auth/refresh")
+async def refresh_token(request: Request, response: Response):
+    token = request.cookies.get("refresh_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="No refresh token")
+    try:
+        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "refresh":
+            raise HTTPException(status_code=401, detail="Invalid token type")
+        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        access = create_access_token(str(user["_id"]), user["email"])
+        response.set_cookie(key="access_token", value=access, httponly=True, secure=False, samesite="lax", max_age=3600, path="/")
+        return {"message": "Token refreshed"}
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+# ─── Contacts Routes ───
+@api_router.post("/contacts")
+async def create_contact(data: ContactCreate, user=Depends(get_any_auth_user)):
+    doc = data.model_dump()
+    doc["user_id"] = user["_id"]
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+    result = await db.contacts.insert_one(doc)
+    doc["id"] = str(result.inserted_id)
+    del doc["_id"]
+    return doc
+
+@api_router.get("/contacts")
+async def list_contacts(user=Depends(get_any_auth_user), search: str = "", property_type: str = ""):
+    query = {"user_id": user["_id"]}
+    if search:
+        query["$or"] = [
+            {"name": {"$regex": search, "$options": "i"}},
+            {"email": {"$regex": search, "$options": "i"}},
+            {"phone": {"$regex": search, "$options": "i"}},
+            {"company": {"$regex": search, "$options": "i"}},
+        ]
+    if property_type:
+        query["property_type"] = property_type
+    contacts = await db.contacts.find(query).sort("created_at", -1).to_list(500)
+    return [serialize_doc(c) for c in contacts]
+
+@api_router.get("/contacts/{contact_id}")
+async def get_contact(contact_id: str, user=Depends(get_any_auth_user)):
+    contact = await db.contacts.find_one({"_id": ObjectId(contact_id), "user_id": user["_id"]})
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    return serialize_doc(contact)
+
+@api_router.put("/contacts/{contact_id}")
+async def update_contact(contact_id: str, data: ContactUpdate, user=Depends(get_any_auth_user)):
+    updates = {k: v for k, v in data.model_dump().items() if v is not None}
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    result = await db.contacts.update_one({"_id": ObjectId(contact_id), "user_id": user["_id"]}, {"$set": updates})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    contact = await db.contacts.find_one({"_id": ObjectId(contact_id)})
+    return serialize_doc(contact)
+
+@api_router.delete("/contacts/{contact_id}")
+async def delete_contact(contact_id: str, user=Depends(get_any_auth_user)):
+    result = await db.contacts.delete_one({"_id": ObjectId(contact_id), "user_id": user["_id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    return {"message": "Contact deleted"}
+
+# ─── Properties Routes ───
+@api_router.post("/properties")
+async def create_property(data: PropertyCreate, user=Depends(get_any_auth_user)):
+    doc = data.model_dump()
+    doc["user_id"] = user["_id"]
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    result = await db.properties.insert_one(doc)
+    doc["id"] = str(result.inserted_id)
+    del doc["_id"]
+    return doc
+
+@api_router.get("/properties")
+async def list_properties(user=Depends(get_any_auth_user), property_type: str = "", listing_type: str = ""):
+    query = {"user_id": user["_id"]}
+    if property_type:
+        query["property_type"] = property_type
+    if listing_type:
+        query["listing_type"] = listing_type
+    props = await db.properties.find(query).sort("created_at", -1).to_list(500)
+    return [serialize_doc(p) for p in props]
+
+@api_router.get("/properties/{property_id}")
+async def get_property(property_id: str, user=Depends(get_any_auth_user)):
+    prop = await db.properties.find_one({"_id": ObjectId(property_id), "user_id": user["_id"]})
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    return serialize_doc(prop)
+
+@api_router.put("/properties/{property_id}")
+async def update_property(property_id: str, data: dict, user=Depends(get_any_auth_user)):
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    data.pop("id", None)
+    result = await db.properties.update_one({"_id": ObjectId(property_id), "user_id": user["_id"]}, {"$set": data})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Property not found")
+    prop = await db.properties.find_one({"_id": ObjectId(property_id)})
+    return serialize_doc(prop)
+
+@api_router.delete("/properties/{property_id}")
+async def delete_property(property_id: str, user=Depends(get_any_auth_user)):
+    result = await db.properties.delete_one({"_id": ObjectId(property_id), "user_id": user["_id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Property not found")
+    return {"message": "Property deleted"}
+
+# ─── Deals / Pipeline Routes ───
+@api_router.get("/pipelines/stages")
+async def get_pipeline_stages():
+    return PIPELINE_STAGES
+
+@api_router.post("/deals")
+async def create_deal(data: DealCreate, user=Depends(get_any_auth_user)):
+    if data.pipeline_type not in PIPELINE_STAGES:
+        raise HTTPException(status_code=400, detail="Invalid pipeline type")
+    if data.stage not in PIPELINE_STAGES[data.pipeline_type]:
+        raise HTTPException(status_code=400, detail="Invalid stage for this pipeline")
+    doc = data.model_dump()
+    doc["user_id"] = user["_id"]
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+    result = await db.deals.insert_one(doc)
+    doc["id"] = str(result.inserted_id)
+    del doc["_id"]
+    return doc
+
+@api_router.get("/deals")
+async def list_deals(user=Depends(get_any_auth_user), pipeline_type: str = ""):
+    query = {"user_id": user["_id"]}
+    if pipeline_type:
+        query["pipeline_type"] = pipeline_type
+    deals = await db.deals.find(query).sort("created_at", -1).to_list(500)
+    return [serialize_doc(d) for d in deals]
+
+@api_router.get("/deals/{deal_id}")
+async def get_deal(deal_id: str, user=Depends(get_any_auth_user)):
+    deal = await db.deals.find_one({"_id": ObjectId(deal_id), "user_id": user["_id"]})
+    if not deal:
+        raise HTTPException(status_code=404, detail="Deal not found")
+    return serialize_doc(deal)
+
+@api_router.put("/deals/{deal_id}")
+async def update_deal(deal_id: str, data: DealUpdate, user=Depends(get_any_auth_user)):
+    existing = await db.deals.find_one({"_id": ObjectId(deal_id), "user_id": user["_id"]})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Deal not found")
+    updates = {k: v for k, v in data.model_dump().items() if v is not None}
+    if "stage" in updates:
+        pipeline_type = existing["pipeline_type"]
+        if updates["stage"] not in PIPELINE_STAGES[pipeline_type]:
+            raise HTTPException(status_code=400, detail="Invalid stage for this pipeline")
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.deals.update_one({"_id": ObjectId(deal_id)}, {"$set": updates})
+    deal = await db.deals.find_one({"_id": ObjectId(deal_id)})
+    return serialize_doc(deal)
+
+@api_router.delete("/deals/{deal_id}")
+async def delete_deal(deal_id: str, user=Depends(get_any_auth_user)):
+    result = await db.deals.delete_one({"_id": ObjectId(deal_id), "user_id": user["_id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Deal not found")
+    return {"message": "Deal deleted"}
+
+# ─── Tasks Routes ───
+@api_router.post("/tasks")
+async def create_task(data: TaskCreate, user=Depends(get_any_auth_user)):
+    doc = data.model_dump()
+    doc["user_id"] = user["_id"]
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    result = await db.tasks.insert_one(doc)
+    doc["id"] = str(result.inserted_id)
+    del doc["_id"]
+    return doc
+
+@api_router.get("/tasks")
+async def list_tasks(user=Depends(get_any_auth_user), completed: str = ""):
+    query = {"user_id": user["_id"]}
+    if completed == "true":
+        query["completed"] = True
+    elif completed == "false":
+        query["completed"] = False
+    tasks = await db.tasks.find(query).sort("due_date", 1).to_list(500)
+    return [serialize_doc(t) for t in tasks]
+
+@api_router.put("/tasks/{task_id}")
+async def update_task(task_id: str, data: dict, user=Depends(get_any_auth_user)):
+    data.pop("id", None)
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    result = await db.tasks.update_one({"_id": ObjectId(task_id), "user_id": user["_id"]}, {"$set": data})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task = await db.tasks.find_one({"_id": ObjectId(task_id)})
+    return serialize_doc(task)
+
+@api_router.delete("/tasks/{task_id}")
+async def delete_task(task_id: str, user=Depends(get_any_auth_user)):
+    result = await db.tasks.delete_one({"_id": ObjectId(task_id), "user_id": user["_id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"message": "Task deleted"}
+
+# ─── Activities Routes ───
+@api_router.post("/activities")
+async def create_activity(data: ActivityCreate, user=Depends(get_any_auth_user)):
+    doc = data.model_dump()
+    doc["user_id"] = user["_id"]
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    result = await db.activities.insert_one(doc)
+    doc["id"] = str(result.inserted_id)
+    del doc["_id"]
+    return doc
+
+@api_router.get("/activities")
+async def list_activities(user=Depends(get_any_auth_user), contact_id: str = "", deal_id: str = ""):
+    query = {"user_id": user["_id"]}
+    if contact_id:
+        query["contact_id"] = contact_id
+    if deal_id:
+        query["deal_id"] = deal_id
+    activities = await db.activities.find(query).sort("created_at", -1).to_list(200)
+    return [serialize_doc(a) for a in activities]
+
+# ─── AI Routes ───
+@api_router.post("/ai/draft-email")
+async def ai_draft_email(data: AIEmailRequest, user=Depends(get_any_auth_user)):
+    contact = await db.contacts.find_one({"_id": ObjectId(data.contact_id), "user_id": user["_id"]})
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    activities = await db.activities.find({"contact_id": data.contact_id}).sort("created_at", -1).to_list(10)
+    activity_summary = "\n".join([f"- {a.get('activity_type','')}: {a.get('description','')}" for a in activities])
+    deals = await db.deals.find({"contact_id": data.contact_id}).to_list(10)
+    deal_summary = "\n".join([f"- {d.get('title','')}: {d.get('stage','')}" for d in deals])
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        chat = LlmChat(
+            api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
+            session_id=f"email-draft-{data.contact_id}-{datetime.now(timezone.utc).isoformat()}",
+            system_message=f"""You are an expert real estate agent assistant. Draft a {data.tone} follow-up email.
+Contact: {contact.get('name','')} ({contact.get('email','')})
+Company: {contact.get('company','')}
+Property Interest: {contact.get('property_type','')}
+Recent Activities:
+{activity_summary}
+Current Deals:
+{deal_summary}
+Additional Context: {data.context}
+
+Write a concise, professional email ready to send. Include subject line."""
+        ).with_model("openai", "gpt-5.2")
+        msg = UserMessage(text="Draft the follow-up email now.")
+        result = await chat.send_message(msg)
+        return {"draft": result, "contact_name": contact.get("name", "")}
+    except Exception as e:
+        logger.error(f"AI email draft error: {e}")
+        raise HTTPException(status_code=500, detail=f"AI service error: {str(e)}")
+
+@api_router.post("/ai/lead-score")
+async def ai_lead_score(data: AILeadScoreRequest, user=Depends(get_any_auth_user)):
+    contact = await db.contacts.find_one({"_id": ObjectId(data.contact_id), "user_id": user["_id"]})
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    activities = await db.activities.find({"contact_id": data.contact_id}).to_list(50)
+    deals = await db.deals.find({"contact_id": data.contact_id}).to_list(20)
+    tasks = await db.tasks.find({"contact_id": data.contact_id}).to_list(20)
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        chat = LlmChat(
+            api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
+            session_id=f"lead-score-{data.contact_id}-{datetime.now(timezone.utc).isoformat()}",
+            system_message=f"""You are an expert real estate lead scoring AI. Analyze this lead and provide a score from 0-100.
+Contact: {contact.get('name','')}
+Email: {contact.get('email','')}
+Company: {contact.get('company','')}
+Source: {contact.get('source','')}
+Property Type: {contact.get('property_type','')}
+Number of activities: {len(activities)}
+Number of deals: {len(deals)}
+Number of tasks: {len(tasks)}
+Tags: {', '.join(contact.get('tags', []))}
+
+Respond ONLY with a JSON object: {{"score": <number 0-100>, "reasoning": "<brief explanation>", "next_action": "<recommended next step>"}}"""
+        ).with_model("openai", "gpt-5.2")
+        msg = UserMessage(text="Score this lead now.")
+        result = await chat.send_message(msg)
+        import json
+        try:
+            cleaned = result.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            score_data = json.loads(cleaned)
+            await db.contacts.update_one({"_id": ObjectId(data.contact_id)}, {"$set": {"lead_score": score_data.get("score", 0)}})
+            return score_data
+        except json.JSONDecodeError:
+            return {"score": 50, "reasoning": result, "next_action": "Review manually"}
+    except Exception as e:
+        logger.error(f"AI lead score error: {e}")
+        raise HTTPException(status_code=500, detail=f"AI service error: {str(e)}")
+
+@api_router.post("/ai/summarize-activities")
+async def ai_summarize(contact_id: str, user=Depends(get_any_auth_user)):
+    activities = await db.activities.find({"contact_id": contact_id, "user_id": user["_id"]}).sort("created_at", -1).to_list(50)
+    if not activities:
+        return {"summary": "No activities found for this contact."}
+    contact = await db.contacts.find_one({"_id": ObjectId(contact_id)})
+    activity_text = "\n".join([f"[{a.get('created_at','')}] {a.get('activity_type','')}: {a.get('description','')}" for a in activities])
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        chat = LlmChat(
+            api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
+            session_id=f"summary-{contact_id}-{datetime.now(timezone.utc).isoformat()}",
+            system_message=f"""Summarize these real estate CRM activities for contact {contact.get('name','') if contact else 'Unknown'}. Be concise and highlight key points, next steps, and any concerns."""
+        ).with_model("openai", "gpt-5.2")
+        msg = UserMessage(text=f"Activities:\n{activity_text}")
+        result = await chat.send_message(msg)
+        return {"summary": result}
+    except Exception as e:
+        logger.error(f"AI summary error: {e}")
+        raise HTTPException(status_code=500, detail=f"AI service error: {str(e)}")
+
+# ─── API Keys Management ───
+@api_router.post("/api-keys")
+async def create_api_key(request: Request, user=Depends(get_current_user)):
+    body = await request.json()
+    key = f"pf_{secrets.token_hex(24)}"
+    doc = {
+        "key": key,
+        "name": body.get("name", "API Key"),
+        "user_id": user["_id"],
+        "active": True,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "last_used": None
+    }
+    await db.api_keys.insert_one(doc)
+    return {"key": key, "name": doc["name"], "created_at": doc["created_at"]}
+
+@api_router.get("/api-keys")
+async def list_api_keys(user=Depends(get_current_user)):
+    keys = await db.api_keys.find({"user_id": user["_id"]}, {"_id": 0, "key": 1, "name": 1, "active": 1, "created_at": 1, "last_used": 1}).to_list(50)
+    # Mask key
+    for k in keys:
+        k["key_preview"] = k["key"][:8] + "..." + k["key"][-4:]
+        k["full_key"] = k["key"]
+        del k["key"]
+    return keys
+
+@api_router.delete("/api-keys/{key_preview}")
+async def delete_api_key(key_preview: str, user=Depends(get_current_user)):
+    result = await db.api_keys.delete_one({"user_id": user["_id"], "key": {"$regex": f"^{key_preview[:8]}"}})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="API key not found")
+    return {"message": "API key deleted"}
+
+# ─── Dashboard Stats ───
+@api_router.get("/dashboard/stats")
+async def dashboard_stats(user=Depends(get_any_auth_user)):
+    uid = user["_id"]
+    total_contacts = await db.contacts.count_documents({"user_id": uid})
+    total_deals = await db.deals.count_documents({"user_id": uid})
+    total_properties = await db.properties.count_documents({"user_id": uid})
+    open_tasks = await db.tasks.count_documents({"user_id": uid, "completed": False})
+    # Pipeline breakdown
+    pipeline_stats = {}
+    for pt in PIPELINE_STAGES:
+        stages = {}
+        for stage in PIPELINE_STAGES[pt]:
+            count = await db.deals.count_documents({"user_id": uid, "pipeline_type": pt, "stage": stage})
+            stages[stage] = count
+        pipeline_stats[pt] = stages
+    # Recent activities
+    recent_activities = await db.activities.find({"user_id": uid}).sort("created_at", -1).to_list(10)
+    # Deal value by pipeline
+    deal_values = {}
+    for pt in PIPELINE_STAGES:
+        deals = await db.deals.find({"user_id": uid, "pipeline_type": pt}).to_list(500)
+        deal_values[pt] = sum(d.get("value", 0) for d in deals)
+    return {
+        "total_contacts": total_contacts,
+        "total_deals": total_deals,
+        "total_properties": total_properties,
+        "open_tasks": open_tasks,
+        "pipeline_stats": pipeline_stats,
+        "deal_values": deal_values,
+        "recent_activities": [serialize_doc(a) for a in recent_activities],
+    }
+
+# ─── Startup ───
+@app.on_event("startup")
+async def startup():
+    await db.users.create_index("email", unique=True)
+    await db.login_attempts.create_index("identifier")
+    await db.contacts.create_index("user_id")
+    await db.deals.create_index([("user_id", 1), ("pipeline_type", 1)])
+    await db.tasks.create_index("user_id")
+    await db.activities.create_index([("user_id", 1), ("contact_id", 1)])
+    await db.api_keys.create_index("key", unique=True)
+    # Seed admin
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@propflow.com")
+    admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
+    existing = await db.users.find_one({"email": admin_email})
+    if not existing:
+        await db.users.insert_one({
+            "email": admin_email,
+            "password_hash": hash_password(admin_password),
+            "name": "Admin",
+            "role": "admin",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        })
+        logger.info(f"Admin user created: {admin_email}")
+    elif not verify_password(admin_password, existing["password_hash"]):
+        await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_password)}})
+        logger.info("Admin password updated")
+    # Write test credentials
+    os.makedirs("/app/memory", exist_ok=True)
+    with open("/app/memory/test_credentials.md", "w") as f:
+        f.write(f"# Test Credentials\n\n## Admin\n- Email: {admin_email}\n- Password: {admin_password}\n- Role: admin\n\n## Auth Endpoints\n- POST /api/auth/register\n- POST /api/auth/login\n- POST /api/auth/logout\n- GET /api/auth/me\n- POST /api/auth/refresh\n")
+
 app.include_router(api_router)
 
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=[os.environ.get("FRONTEND_URL", "http://localhost:3000")],
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

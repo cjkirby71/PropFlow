@@ -1,0 +1,236 @@
+import React, { useEffect, useState } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import api from '../lib/api';
+import { ArrowLeft, Phone, Mail, Building, Tag, Sparkles, Plus, Clock, MessageSquare, PhoneCall, FileText } from 'lucide-react';
+import { Button } from '../components/ui/button';
+import { Badge } from '../components/ui/badge';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog';
+import { Label } from '../components/ui/label';
+import { Input } from '../components/ui/input';
+import { Textarea } from '../components/ui/textarea';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
+
+const TYPE_LABELS = { residential_lease: 'Residential Lease', commercial_sale: 'Commercial Sale', commercial_lease: 'Commercial Lease' };
+const ACTIVITY_ICONS = { call: PhoneCall, email: Mail, note: FileText, meeting: Clock };
+
+export default function ContactDetailPage() {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const [contact, setContact] = useState(null);
+  const [activities, setActivities] = useState([]);
+  const [deals, setDeals] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showActivity, setShowActivity] = useState(false);
+  const [showEmail, setShowEmail] = useState(false);
+  const [emailDraft, setEmailDraft] = useState('');
+  const [emailLoading, setEmailLoading] = useState(false);
+  const [scoreLoading, setScoreLoading] = useState(false);
+
+  useEffect(() => {
+    Promise.all([
+      api.get(`/contacts/${id}`),
+      api.get('/activities', { params: { contact_id: id } }),
+      api.get('/deals'),
+    ]).then(([c, a, d]) => {
+      setContact(c.data);
+      setActivities(a.data);
+      setDeals(d.data.filter(deal => deal.contact_id === id));
+      setLoading(false);
+    }).catch(() => { navigate('/contacts'); });
+  }, [id, navigate]);
+
+  const handleAddActivity = async (actData) => {
+    await api.post('/activities', { ...actData, contact_id: id });
+    const { data } = await api.get('/activities', { params: { contact_id: id } });
+    setActivities(data);
+    setShowActivity(false);
+  };
+
+  const handleDraftEmail = async () => {
+    setEmailLoading(true);
+    try {
+      const { data } = await api.post('/ai/draft-email', { contact_id: id, context: '', tone: 'professional' });
+      setEmailDraft(data.draft);
+      setShowEmail(true);
+    } catch (err) {
+      alert('AI draft failed: ' + (err.response?.data?.detail || err.message));
+    }
+    setEmailLoading(false);
+  };
+
+  const handleScore = async () => {
+    setScoreLoading(true);
+    try {
+      const { data } = await api.post('/ai/lead-score', { contact_id: id });
+      alert(`Score: ${data.score}/100\n\n${data.reasoning}\n\nNext: ${data.next_action}`);
+      const { data: updated } = await api.get(`/contacts/${id}`);
+      setContact(updated);
+    } catch (err) {
+      alert('Scoring failed: ' + (err.response?.data?.detail || err.message));
+    }
+    setScoreLoading(false);
+  };
+
+  if (loading) return <div className="p-6"><div className="animate-pulse space-y-4"><div className="h-8 bg-slate-200 rounded w-48" /><div className="h-40 bg-slate-200 rounded-lg" /></div></div>;
+
+  return (
+    <div className="p-4 sm:p-6 lg:p-8 max-w-[1600px] mx-auto space-y-6" data-testid="contact-detail-page">
+      <button onClick={() => navigate('/contacts')} className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-800 transition-colors" data-testid="back-to-contacts">
+        <ArrowLeft className="w-4 h-4" /> Back to Contacts
+      </button>
+
+      {/* Header */}
+      <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5 sm:p-6">
+        <div className="flex items-start justify-between flex-wrap gap-4">
+          <div className="flex items-start gap-4">
+            <div className="w-14 h-14 rounded-full bg-slate-200 flex items-center justify-center flex-shrink-0">
+              <span className="text-xl font-bold text-slate-600">{contact.name?.charAt(0)?.toUpperCase()}</span>
+            </div>
+            <div>
+              <h1 className="font-heading text-2xl font-bold text-slate-900">{contact.name}</h1>
+              {contact.company && <p className="text-sm text-slate-500 flex items-center gap-1 mt-0.5"><Building className="w-3.5 h-3.5" /> {contact.company}</p>}
+              <div className="flex items-center gap-4 mt-2 flex-wrap">
+                {contact.email && <span className="text-sm text-slate-600 flex items-center gap-1"><Mail className="w-3.5 h-3.5" /> {contact.email}</span>}
+                {contact.phone && <span className="text-sm text-slate-600 flex items-center gap-1"><Phone className="w-3.5 h-3.5" /> {contact.phone}</span>}
+              </div>
+              <div className="flex items-center gap-2 mt-3 flex-wrap">
+                <Badge variant="outline">{TYPE_LABELS[contact.property_type] || contact.property_type}</Badge>
+                <Badge variant="secondary">{contact.source}</Badge>
+                {contact.tags?.map(t => <Badge key={t} className="bg-slate-100 text-slate-700"><Tag className="w-3 h-3 mr-1" />{t}</Badge>)}
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-semibold ${contact.lead_score >= 70 ? 'bg-green-100 text-green-800' : contact.lead_score >= 40 ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-600'}`}>
+              Score: {contact.lead_score || 0}/100
+            </div>
+            <Button variant="outline" size="sm" onClick={handleScore} disabled={scoreLoading} className="gap-1.5" data-testid="ai-score-button">
+              <Sparkles className="w-3.5 h-3.5 text-amber-500" /> {scoreLoading ? 'Scoring...' : 'AI Score'}
+            </Button>
+            <Button size="sm" onClick={handleDraftEmail} disabled={emailLoading} className="bg-amber-100 text-amber-900 border border-amber-200 hover:bg-amber-200 gap-1.5" data-testid="ai-email-button">
+              <Sparkles className="w-3.5 h-3.5" /> {emailLoading ? 'Drafting...' : 'Draft Email'}
+            </Button>
+          </div>
+        </div>
+        {contact.notes && <p className="text-sm text-slate-600 mt-4 border-t border-slate-100 pt-4">{contact.notes}</p>}
+      </div>
+
+      <Tabs defaultValue="activities" className="space-y-4">
+        <TabsList data-testid="contact-detail-tabs">
+          <TabsTrigger value="activities">Activities ({activities.length})</TabsTrigger>
+          <TabsTrigger value="deals">Deals ({deals.length})</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="activities">
+          <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-medium text-slate-800">Activity Timeline</h3>
+              <Dialog open={showActivity} onOpenChange={setShowActivity}>
+                <DialogTrigger asChild>
+                  <Button variant="outline" size="sm" className="gap-1.5" data-testid="add-activity-button"><Plus className="w-3.5 h-3.5" /> Log Activity</Button>
+                </DialogTrigger>
+                <DialogContent data-testid="add-activity-dialog">
+                  <DialogHeader><DialogTitle>Log Activity</DialogTitle></DialogHeader>
+                  <ActivityForm onSubmit={handleAddActivity} />
+                </DialogContent>
+              </Dialog>
+            </div>
+            {activities.length === 0 ? (
+              <p className="text-sm text-slate-400 py-8 text-center">No activities logged yet.</p>
+            ) : (
+              <div className="space-y-3">
+                {activities.map((a, i) => {
+                  const Icon = ACTIVITY_ICONS[a.activity_type] || MessageSquare;
+                  return (
+                    <div key={i} className="flex items-start gap-3 py-3 border-b border-slate-100 last:border-0" data-testid={`activity-item-${i}`}>
+                      <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center flex-shrink-0">
+                        <Icon className="w-4 h-4 text-slate-500" />
+                      </div>
+                      <div className="flex-1">
+                        <p className="text-sm text-slate-700">{a.description}</p>
+                        <p className="text-xs text-slate-400 mt-0.5">{a.activity_type} &middot; {new Date(a.created_at).toLocaleString()}</p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </TabsContent>
+
+        <TabsContent value="deals">
+          <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5">
+            <h3 className="text-lg font-medium text-slate-800 mb-4">Associated Deals</h3>
+            {deals.length === 0 ? (
+              <p className="text-sm text-slate-400 py-8 text-center">No deals linked to this contact.</p>
+            ) : (
+              <div className="space-y-3">
+                {deals.map(d => (
+                  <div key={d.id} className="flex items-center justify-between p-3 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors cursor-pointer" onClick={() => navigate('/pipeline')} data-testid={`deal-link-${d.id}`}>
+                    <div>
+                      <p className="text-sm font-medium text-slate-900">{d.title}</p>
+                      <p className="text-xs text-slate-500 mt-0.5">{TYPE_LABELS[d.pipeline_type]} &middot; {d.stage}</p>
+                    </div>
+                    {d.value > 0 && <span className="text-sm font-semibold text-slate-900">${d.value.toLocaleString()}</span>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </TabsContent>
+      </Tabs>
+
+      {/* AI Email Draft Dialog */}
+      <Dialog open={showEmail} onOpenChange={setShowEmail}>
+        <DialogContent className="sm:max-w-lg" data-testid="ai-email-dialog">
+          <DialogHeader><DialogTitle className="flex items-center gap-2"><Sparkles className="w-4 h-4 text-amber-500" /> AI Email Draft</DialogTitle></DialogHeader>
+          <div className="bg-amber-50 border border-amber-200 rounded-md p-4 max-h-80 overflow-y-auto">
+            <pre className="whitespace-pre-wrap text-sm text-slate-800 font-sans">{emailDraft}</pre>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setShowEmail(false)}>Close</Button>
+            <Button onClick={() => { navigator.clipboard.writeText(emailDraft); }} className="bg-slate-900 text-white hover:bg-slate-800" data-testid="copy-email-draft">Copy to Clipboard</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function ActivityForm({ onSubmit }) {
+  const [type, setType] = useState('note');
+  const [desc, setDesc] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setSubmitting(true);
+    await onSubmit({ activity_type: type, description: desc });
+    setSubmitting(false);
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <div>
+        <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Type</Label>
+        <Select value={type} onValueChange={setType}>
+          <SelectTrigger className="bg-white" data-testid="activity-type-select"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="call">Call</SelectItem>
+            <SelectItem value="email">Email</SelectItem>
+            <SelectItem value="note">Note</SelectItem>
+            <SelectItem value="meeting">Meeting</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <div>
+        <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Description</Label>
+        <Textarea value={desc} onChange={e => setDesc(e.target.value)} required rows={3} className="bg-white border-slate-300" data-testid="activity-description-input" />
+      </div>
+      <Button type="submit" disabled={submitting} className="w-full bg-slate-900 text-white hover:bg-slate-800" data-testid="activity-form-submit">
+        {submitting ? 'Logging...' : 'Log Activity'}
+      </Button>
+    </form>
+  );
+}
