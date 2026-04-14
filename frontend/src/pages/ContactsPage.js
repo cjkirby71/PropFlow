@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import api from '../lib/api';
-import { Plus, Search, Phone, Mail, Building, Tag, MoreHorizontal, Sparkles, Trash2, Edit } from 'lucide-react';
+import { Plus, Search, Phone, Mail, Building, Tag, MoreHorizontal, Sparkles, Trash2, Edit, Download, Upload } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog';
@@ -57,6 +57,31 @@ export default function ContactsPage() {
     }
   };
 
+  const handleExportCSV = async () => {
+    try {
+      const response = await api.get('/contacts/export', { responseType: 'blob' });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'contacts_export.csv';
+      a.click();
+      window.URL.revokeObjectURL(url);
+    } catch (err) { alert('Export failed: ' + (err.response?.data?.detail || err.message)); }
+  };
+
+  const handleImportCSV = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const { data } = await api.post('/contacts/import', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+      alert(`Imported ${data.imported} contacts.${data.errors?.length ? `\n\nErrors:\n${data.errors.join('\n')}` : ''}`);
+      fetchContacts();
+    } catch (err) { alert('Import failed: ' + (err.response?.data?.detail || err.message)); }
+    e.target.value = '';
+  };
+
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-[1600px] mx-auto space-y-5" data-testid="contacts-page">
       <div className="flex items-center justify-between flex-wrap gap-3">
@@ -64,17 +89,28 @@ export default function ContactsPage() {
           <h1 className="font-heading text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">Contacts</h1>
           <p className="text-sm text-slate-500 mt-1">{contacts.length} contacts</p>
         </div>
-        <Dialog open={showAdd} onOpenChange={setShowAdd}>
-          <DialogTrigger asChild>
-            <Button className="bg-slate-900 text-white hover:bg-slate-800 gap-2" data-testid="add-contact-button">
-              <Plus className="w-4 h-4" /> Add Contact
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={handleExportCSV} className="gap-1.5" data-testid="export-contacts-csv">
+            <Download className="w-4 h-4" /> Export
+          </Button>
+          <label className="cursor-pointer">
+            <Button variant="outline" size="sm" className="gap-1.5 pointer-events-none" data-testid="import-contacts-csv">
+              <Upload className="w-4 h-4" /> Import
             </Button>
-          </DialogTrigger>
+            <input type="file" accept=".csv" onChange={handleImportCSV} className="hidden" />
+          </label>
+          <Dialog open={showAdd} onOpenChange={setShowAdd}>
+            <DialogTrigger asChild>
+              <Button className="bg-slate-900 text-white hover:bg-slate-800 gap-2" data-testid="add-contact-button">
+                <Plus className="w-4 h-4" /> Add Contact
+              </Button>
+            </DialogTrigger>
           <DialogContent className="sm:max-w-md" data-testid="add-contact-dialog">
             <DialogHeader><DialogTitle>Add New Contact</DialogTitle></DialogHeader>
             <ContactForm onSubmit={async (d) => { await api.post('/contacts', d); setShowAdd(false); fetchContacts(); }} />
           </DialogContent>
         </Dialog>
+        </div>
       </div>
 
       {/* Filters */}

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import {
-  LayoutDashboard, Users, Building2, Kanban, CheckSquare, Settings, LogOut, Menu, X, Sparkles, Search
+  LayoutDashboard, Users, Building2, Kanban, CheckSquare, Settings, LogOut, Menu, X, Sparkles, Search, CalendarDays
 } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -13,6 +13,7 @@ const navItems = [
   { to: '/pipeline', icon: Kanban, label: 'Pipeline' },
   { to: '/properties', icon: Building2, label: 'Properties' },
   { to: '/tasks', icon: CheckSquare, label: 'Tasks' },
+  { to: '/calendar', icon: CalendarDays, label: 'Calendar' },
   { to: '/settings', icon: Settings, label: 'Settings' },
 ];
 

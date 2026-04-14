@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../lib/api';
-import { ArrowLeft, Phone, Mail, Building, Tag, Sparkles, Plus, Clock, MessageSquare, PhoneCall, FileText } from 'lucide-react';
+import { ArrowLeft, Phone, Mail, Building, Tag, Sparkles, Plus, Clock, MessageSquare, PhoneCall, FileText, Send, MessageCircle } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog';
@@ -22,8 +22,12 @@ export default function ContactDetailPage() {
   const [deals, setDeals] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showActivity, setShowActivity] = useState(false);
-  const [showEmail, setShowEmail] = useState(false);
-  const [emailDraft, setEmailDraft] = useState('');
+  const [showSendEmail, setShowSendEmail] = useState(false);
+  const [showSendSMS, setShowSendSMS] = useState(false);
+  const [emailForm, setEmailForm] = useState({ subject: '', body: '' });
+  const [smsForm, setSmsForm] = useState({ message: '' });
+  const [sendingEmail, setSendingEmail] = useState(false);
+  const [sendingSMS, setSendingSMS] = useState(false);
   const [emailLoading, setEmailLoading] = useState(false);
   const [scoreLoading, setScoreLoading] = useState(false);
 
@@ -47,18 +51,6 @@ export default function ContactDetailPage() {
     setShowActivity(false);
   };
 
-  const handleDraftEmail = async () => {
-    setEmailLoading(true);
-    try {
-      const { data } = await api.post('/ai/draft-email', { contact_id: id, context: '', tone: 'professional' });
-      setEmailDraft(data.draft);
-      setShowEmail(true);
-    } catch (err) {
-      alert('AI draft failed: ' + (err.response?.data?.detail || err.message));
-    }
-    setEmailLoading(false);
-  };
-
   const handleScore = async () => {
     setScoreLoading(true);
     try {
@@ -70,6 +62,60 @@ export default function ContactDetailPage() {
       alert('Scoring failed: ' + (err.response?.data?.detail || err.message));
     }
     setScoreLoading(false);
+  };
+
+  const handleSendEmail = async () => {
+    if (!emailForm.subject || !emailForm.body) return alert('Subject and body required');
+    setSendingEmail(true);
+    try {
+      await api.post('/email/send', { contact_id: id, to_email: contact.email, subject: emailForm.subject, body: emailForm.body });
+      alert('Email sent successfully!');
+      setShowSendEmail(false);
+      setEmailForm({ subject: '', body: '' });
+      const { data } = await api.get('/activities', { params: { contact_id: id } });
+      setActivities(data);
+    } catch (err) {
+      alert('Send failed: ' + (err.response?.data?.detail || err.message));
+    }
+    setSendingEmail(false);
+  };
+
+  const handleSendSMS = async () => {
+    if (!smsForm.message) return alert('Message required');
+    setSendingSMS(true);
+    try {
+      await api.post('/sms/send', { contact_id: id, to_phone: contact.phone, message: smsForm.message });
+      alert('SMS sent successfully!');
+      setShowSendSMS(false);
+      setSmsForm({ message: '' });
+      const { data } = await api.get('/activities', { params: { contact_id: id } });
+      setActivities(data);
+    } catch (err) {
+      alert('SMS failed: ' + (err.response?.data?.detail || err.message));
+    }
+    setSendingSMS(false);
+  };
+
+  const handleDraftAndFill = async () => {
+    setEmailLoading(true);
+    try {
+      const { data } = await api.post('/ai/draft-email', { contact_id: id, context: '', tone: 'professional' });
+      const lines = data.draft.split('\n');
+      let subject = '';
+      let body = data.draft;
+      for (const line of lines) {
+        if (line.toLowerCase().startsWith('subject:')) {
+          subject = line.replace(/^subject:\s*/i, '').trim();
+          body = data.draft.replace(line, '').trim();
+          break;
+        }
+      }
+      setEmailForm({ subject: subject || 'Follow-up', body });
+      setShowSendEmail(true);
+    } catch (err) {
+      alert('AI draft failed: ' + (err.response?.data?.detail || err.message));
+    }
+    setEmailLoading(false);
   };
 
   if (loading) return <div className="p-6"><div className="animate-pulse space-y-4"><div className="h-8 bg-slate-200 rounded w-48" /><div className="h-40 bg-slate-200 rounded-lg" /></div></div>;
@@ -108,9 +154,19 @@ export default function ContactDetailPage() {
             <Button variant="outline" size="sm" onClick={handleScore} disabled={scoreLoading} className="gap-1.5" data-testid="ai-score-button">
               <Sparkles className="w-3.5 h-3.5 text-amber-500" /> {scoreLoading ? 'Scoring...' : 'AI Score'}
             </Button>
-            <Button size="sm" onClick={handleDraftEmail} disabled={emailLoading} className="bg-amber-100 text-amber-900 border border-amber-200 hover:bg-amber-200 gap-1.5" data-testid="ai-email-button">
-              <Sparkles className="w-3.5 h-3.5" /> {emailLoading ? 'Drafting...' : 'Draft Email'}
+            <Button size="sm" onClick={handleDraftAndFill} disabled={emailLoading} className="bg-amber-100 text-amber-900 border border-amber-200 hover:bg-amber-200 gap-1.5" data-testid="ai-email-button">
+              <Sparkles className="w-3.5 h-3.5" /> {emailLoading ? 'Drafting...' : 'AI Draft Email'}
             </Button>
+            {contact.email && (
+              <Button size="sm" variant="outline" onClick={() => setShowSendEmail(true)} className="gap-1.5" data-testid="send-email-button">
+                <Send className="w-3.5 h-3.5" /> Email
+              </Button>
+            )}
+            {contact.phone && (
+              <Button size="sm" variant="outline" onClick={() => setShowSendSMS(true)} className="gap-1.5" data-testid="send-sms-button">
+                <MessageCircle className="w-3.5 h-3.5" /> SMS
+              </Button>
+            )}
           </div>
         </div>
         {contact.notes && <p className="text-sm text-slate-600 mt-4 border-t border-slate-100 pt-4">{contact.notes}</p>}
@@ -181,16 +237,53 @@ export default function ContactDetailPage() {
         </TabsContent>
       </Tabs>
 
-      {/* AI Email Draft Dialog */}
-      <Dialog open={showEmail} onOpenChange={setShowEmail}>
-        <DialogContent className="sm:max-w-lg" data-testid="ai-email-dialog">
-          <DialogHeader><DialogTitle className="flex items-center gap-2"><Sparkles className="w-4 h-4 text-amber-500" /> AI Email Draft</DialogTitle></DialogHeader>
-          <div className="bg-amber-50 border border-amber-200 rounded-md p-4 max-h-80 overflow-y-auto">
-            <pre className="whitespace-pre-wrap text-sm text-slate-800 font-sans">{emailDraft}</pre>
+      {/* Send Email Dialog */}
+      <Dialog open={showSendEmail} onOpenChange={setShowSendEmail}>
+        <DialogContent className="sm:max-w-lg" data-testid="send-email-dialog">
+          <DialogHeader><DialogTitle className="flex items-center gap-2"><Send className="w-4 h-4 text-blue-500" /> Send Email</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <Label className="text-sm font-medium text-slate-700 mb-1.5 block">To</Label>
+              <Input value={contact?.email || ''} disabled className="bg-slate-50" />
+            </div>
+            <div>
+              <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Subject</Label>
+              <Input value={emailForm.subject} onChange={e => setEmailForm({...emailForm, subject: e.target.value})} placeholder="Email subject" className="bg-white border-slate-300" data-testid="email-subject-input" />
+            </div>
+            <div>
+              <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Body</Label>
+              <Textarea value={emailForm.body} onChange={e => setEmailForm({...emailForm, body: e.target.value})} rows={8} className="bg-white border-slate-300" data-testid="email-body-input" />
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setShowSendEmail(false)}>Cancel</Button>
+              <Button onClick={handleSendEmail} disabled={sendingEmail} className="bg-slate-900 text-white hover:bg-slate-800 gap-1.5" data-testid="send-email-submit">
+                <Send className="w-3.5 h-3.5" /> {sendingEmail ? 'Sending...' : 'Send Email'}
+              </Button>
+            </div>
           </div>
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={() => setShowEmail(false)}>Close</Button>
-            <Button onClick={() => { navigator.clipboard.writeText(emailDraft); }} className="bg-slate-900 text-white hover:bg-slate-800" data-testid="copy-email-draft">Copy to Clipboard</Button>
+        </DialogContent>
+      </Dialog>
+
+      {/* Send SMS Dialog */}
+      <Dialog open={showSendSMS} onOpenChange={setShowSendSMS}>
+        <DialogContent className="sm:max-w-md" data-testid="send-sms-dialog">
+          <DialogHeader><DialogTitle className="flex items-center gap-2"><MessageCircle className="w-4 h-4 text-green-500" /> Send SMS</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <Label className="text-sm font-medium text-slate-700 mb-1.5 block">To</Label>
+              <Input value={contact?.phone || ''} disabled className="bg-slate-50" />
+            </div>
+            <div>
+              <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Message</Label>
+              <Textarea value={smsForm.message} onChange={e => setSmsForm({message: e.target.value})} rows={4} placeholder="Type your message..." className="bg-white border-slate-300" data-testid="sms-message-input" />
+              <p className="text-xs text-slate-400 mt-1">{smsForm.message.length}/160 characters</p>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setShowSendSMS(false)}>Cancel</Button>
+              <Button onClick={handleSendSMS} disabled={sendingSMS} className="bg-slate-900 text-white hover:bg-slate-800 gap-1.5" data-testid="send-sms-submit">
+                <MessageCircle className="w-3.5 h-3.5" /> {sendingSMS ? 'Sending...' : 'Send SMS'}
+              </Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>

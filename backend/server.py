@@ -4,7 +4,8 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
@@ -12,6 +13,10 @@ import logging
 import bcrypt
 import jwt
 import secrets
+import csv
+import io
+import json
+import httpx
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime, timezone, timedelta
@@ -181,6 +186,42 @@ class AIEmailRequest(BaseModel):
 class AILeadScoreRequest(BaseModel):
     contact_id: str
 
+class SendEmailRequest(BaseModel):
+    contact_id: str
+    to_email: str
+    subject: str
+    body: str
+
+class SendSMSRequest(BaseModel):
+    contact_id: str
+    to_phone: str
+    message: str
+
+class WebhookCreate(BaseModel):
+    url: str
+    events: List[str]  # new_lead, deal_stage_change, new_activity, etc.
+    name: Optional[str] = "Webhook"
+
+class TeamInviteRequest(BaseModel):
+    email: str
+    name: str
+    role: Optional[str] = "agent"
+
+# ─── Stage Automation Config ───
+STAGE_AUTO_TASKS = {
+    "Contacted": {"title": "Follow up within 24 hours", "priority": "high", "days_offset": 1},
+    "Showing": {"title": "Confirm showing details", "priority": "high", "days_offset": 0},
+    "Tour": {"title": "Prepare tour materials", "priority": "high", "days_offset": 0},
+    "Application": {"title": "Review application", "priority": "high", "days_offset": 1},
+    "LOI": {"title": "Review Letter of Intent", "priority": "high", "days_offset": 2},
+    "Due Diligence": {"title": "Begin due diligence checklist", "priority": "high", "days_offset": 1},
+    "Proposal": {"title": "Prepare lease proposal", "priority": "high", "days_offset": 1},
+    "Negotiation": {"title": "Schedule negotiation meeting", "priority": "medium", "days_offset": 2},
+    "Lease Signed": {"title": "Process lease paperwork", "priority": "high", "days_offset": 1},
+    "Closing": {"title": "Coordinate closing logistics", "priority": "high", "days_offset": 3},
+    "Closed": {"title": "Send thank you & request referral", "priority": "low", "days_offset": 2},
+}
+
 # ─── Pipeline Stage Definitions ───
 PIPELINE_STAGES = {
     "residential_lease": ["New Lead", "Contacted", "Showing", "Application", "Lease Signed", "Closed"],
@@ -276,7 +317,7 @@ async def refresh_token(request: Request, response: Response):
 
 # ─── Contacts Routes ───
 @api_router.post("/contacts")
-async def create_contact(data: ContactCreate, user=Depends(get_any_auth_user)):
+async def create_contact(data: ContactCreate, background_tasks: BackgroundTasks, user=Depends(get_any_auth_user)):
     doc = data.model_dump()
     doc["user_id"] = user["_id"]
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
@@ -284,6 +325,7 @@ async def create_contact(data: ContactCreate, user=Depends(get_any_auth_user)):
     result = await db.contacts.insert_one(doc)
     doc["id"] = str(result.inserted_id)
     del doc["_id"]
+    background_tasks.add_task(trigger_webhooks, user["_id"], "new_lead", {"contact_id": doc["id"], "name": doc["name"], "email": doc.get("email", "")})
     return doc
 
 @api_router.get("/contacts")
@@ -300,6 +342,31 @@ async def list_contacts(user=Depends(get_any_auth_user), search: str = "", prope
         query["property_type"] = property_type
     contacts = await db.contacts.find(query).sort("created_at", -1).to_list(500)
     return [serialize_doc(c) for c in contacts]
+
+@api_router.get("/contacts/export")
+async def export_contacts_csv(user=Depends(get_any_auth_user)):
+    contacts = await db.contacts.find({"user_id": user["_id"]}).to_list(5000)
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=["name", "email", "phone", "company", "source", "property_type", "tags", "notes", "lead_score"])
+    writer.writeheader()
+    for c in contacts:
+        writer.writerow({
+            "name": c.get("name", ""),
+            "email": c.get("email", ""),
+            "phone": c.get("phone", ""),
+            "company": c.get("company", ""),
+            "source": c.get("source", ""),
+            "property_type": c.get("property_type", ""),
+            "tags": ",".join(c.get("tags", [])),
+            "notes": c.get("notes", ""),
+            "lead_score": c.get("lead_score", 0),
+        })
+    output.seek(0)
+    return StreamingResponse(
+        io.BytesIO(output.getvalue().encode()),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=contacts_export.csv"}
+    )
 
 @api_router.get("/contacts/{contact_id}")
 async def get_contact(contact_id: str, user=Depends(get_any_auth_user)):
@@ -406,11 +473,12 @@ async def get_deal(deal_id: str, user=Depends(get_any_auth_user)):
     return serialize_doc(deal)
 
 @api_router.put("/deals/{deal_id}")
-async def update_deal(deal_id: str, data: DealUpdate, user=Depends(get_any_auth_user)):
+async def update_deal(deal_id: str, data: DealUpdate, background_tasks: BackgroundTasks, user=Depends(get_any_auth_user)):
     existing = await db.deals.find_one({"_id": ObjectId(deal_id), "user_id": user["_id"]})
     if not existing:
         raise HTTPException(status_code=404, detail="Deal not found")
     updates = {k: v for k, v in data.model_dump().items() if v is not None}
+    old_stage = existing.get("stage")
     if "stage" in updates:
         pipeline_type = existing["pipeline_type"]
         if updates["stage"] not in PIPELINE_STAGES[pipeline_type]:
@@ -418,7 +486,32 @@ async def update_deal(deal_id: str, data: DealUpdate, user=Depends(get_any_auth_
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
     await db.deals.update_one({"_id": ObjectId(deal_id)}, {"$set": updates})
     deal = await db.deals.find_one({"_id": ObjectId(deal_id)})
-    return serialize_doc(deal)
+    serialized = serialize_doc(deal)
+    # ─── Stage Automation: auto-create task on stage change ───
+    new_stage = updates.get("stage")
+    if new_stage and new_stage != old_stage and new_stage in STAGE_AUTO_TASKS:
+        auto = STAGE_AUTO_TASKS[new_stage]
+        due = (datetime.now(timezone.utc) + timedelta(days=auto["days_offset"])).strftime("%Y-%m-%d")
+        await db.tasks.insert_one({
+            "title": f"[Auto] {auto['title']} - {existing.get('title', '')}",
+            "description": f"Auto-generated when deal moved to {new_stage}",
+            "due_date": due,
+            "contact_id": existing.get("contact_id", ""),
+            "deal_id": deal_id,
+            "priority": auto["priority"],
+            "completed": False,
+            "user_id": user["_id"],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        logger.info(f"Auto-task created for deal {deal_id} stage change to {new_stage}")
+    # ─── Webhook: trigger on deal stage change ───
+    if new_stage and new_stage != old_stage:
+        background_tasks.add_task(trigger_webhooks, user["_id"], "deal_stage_change", {
+            "deal_id": deal_id, "title": existing.get("title", ""),
+            "pipeline_type": existing.get("pipeline_type", ""),
+            "old_stage": old_stage, "new_stage": new_stage,
+        })
+    return serialized
 
 @api_router.delete("/deals/{deal_id}")
 async def delete_deal(deal_id: str, user=Depends(get_any_auth_user)):
@@ -584,6 +677,188 @@ async def ai_summarize(contact_id: str, user=Depends(get_any_auth_user)):
         raise HTTPException(status_code=500, detail=f"AI service error: {str(e)}")
 
 # ─── API Keys Management ───
+
+# ─── Webhook Helper ───
+async def trigger_webhooks(user_id: str, event: str, payload: dict):
+    webhooks = await db.webhooks.find({"user_id": user_id, "active": True}).to_list(50)
+    for wh in webhooks:
+        if event in wh.get("events", []):
+            try:
+                async with httpx.AsyncClient(timeout=10) as client_http:
+                    await client_http.post(wh["url"], json={"event": event, "data": payload, "timestamp": datetime.now(timezone.utc).isoformat()})
+                    await db.webhooks.update_one({"_id": wh["_id"]}, {"$set": {"last_triggered": datetime.now(timezone.utc).isoformat()}})
+            except Exception as e:
+                logger.error(f"Webhook {wh.get('name','')} failed: {e}")
+
+# ─── CSV Import/Export ───
+@api_router.post("/contacts/import")
+async def import_contacts_csv(file: UploadFile = File(...), user=Depends(get_any_auth_user)):
+    content = await file.read()
+    text = content.decode("utf-8")
+    reader = csv.DictReader(io.StringIO(text))
+    imported = 0
+    errors_list = []
+    for i, row in enumerate(reader):
+        try:
+            doc = {
+                "name": row.get("name", "").strip(),
+                "email": row.get("email", "").strip(),
+                "phone": row.get("phone", "").strip(),
+                "company": row.get("company", "").strip(),
+                "source": row.get("source", "csv_import").strip(),
+                "property_type": row.get("property_type", "residential_lease").strip(),
+                "tags": [t.strip() for t in row.get("tags", "").split(",") if t.strip()],
+                "notes": row.get("notes", "").strip(),
+                "lead_score": int(row.get("lead_score", 0) or 0),
+                "user_id": user["_id"],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if not doc["name"]:
+                errors_list.append(f"Row {i+1}: Missing name")
+                continue
+            await db.contacts.insert_one(doc)
+            imported += 1
+        except Exception as e:
+            errors_list.append(f"Row {i+1}: {str(e)}")
+    return {"imported": imported, "errors": errors_list}
+
+# ─── Email Sending (SendGrid) ───
+@api_router.post("/email/send")
+async def send_email_endpoint(data: SendEmailRequest, background_tasks: BackgroundTasks, user=Depends(get_any_auth_user)):
+    sg_key = os.environ.get("SENDGRID_API_KEY", "")
+    sender = os.environ.get("SENDER_EMAIL", "")
+    if not sg_key or not sender:
+        raise HTTPException(status_code=503, detail="Email service not configured. Add SENDGRID_API_KEY and SENDER_EMAIL to .env")
+    try:
+        from sendgrid import SendGridAPIClient
+        from sendgrid.helpers.mail import Mail
+        message = Mail(from_email=sender, to_emails=data.to_email, subject=data.subject, html_content=data.body.replace("\n", "<br>"))
+        sg = SendGridAPIClient(sg_key)
+        response = sg.send(message)
+        # Log activity
+        await db.activities.insert_one({
+            "contact_id": data.contact_id, "user_id": user["_id"],
+            "activity_type": "email", "description": f"Sent email: {data.subject}",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        background_tasks.add_task(trigger_webhooks, user["_id"], "email_sent", {"contact_id": data.contact_id, "subject": data.subject})
+        return {"success": True, "status_code": response.status_code}
+    except Exception as e:
+        logger.error(f"SendGrid error: {e}")
+        raise HTTPException(status_code=500, detail=f"Email sending failed: {str(e)}")
+
+# ─── SMS Sending (Twilio) ───
+@api_router.post("/sms/send")
+async def send_sms_endpoint(data: SendSMSRequest, background_tasks: BackgroundTasks, user=Depends(get_any_auth_user)):
+    account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
+    auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
+    from_number = os.environ.get("TWILIO_PHONE_NUMBER", "")
+    if not account_sid or not auth_token or not from_number:
+        raise HTTPException(status_code=503, detail="SMS service not configured. Add TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_PHONE_NUMBER to .env")
+    try:
+        from twilio.rest import Client as TwilioClient
+        twilio_client = TwilioClient(account_sid, auth_token)
+        msg = twilio_client.messages.create(body=data.message, from_=from_number, to=data.to_phone)
+        await db.activities.insert_one({
+            "contact_id": data.contact_id, "user_id": user["_id"],
+            "activity_type": "sms", "description": f"Sent SMS: {data.message[:80]}...",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        background_tasks.add_task(trigger_webhooks, user["_id"], "sms_sent", {"contact_id": data.contact_id, "message": data.message[:80]})
+        return {"success": True, "sid": msg.sid}
+    except Exception as e:
+        logger.error(f"Twilio error: {e}")
+        raise HTTPException(status_code=500, detail=f"SMS sending failed: {str(e)}")
+
+# ─── Webhooks Management ───
+@api_router.post("/webhooks")
+async def create_webhook(data: WebhookCreate, user=Depends(get_current_user)):
+    doc = data.model_dump()
+    doc["user_id"] = user["_id"]
+    doc["active"] = True
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    doc["last_triggered"] = None
+    result = await db.webhooks.insert_one(doc)
+    doc["id"] = str(result.inserted_id)
+    del doc["_id"]
+    return doc
+
+@api_router.get("/webhooks")
+async def list_webhooks(user=Depends(get_current_user)):
+    webhooks = await db.webhooks.find({"user_id": user["_id"]}).to_list(50)
+    return [serialize_doc(w) for w in webhooks]
+
+@api_router.delete("/webhooks/{webhook_id}")
+async def delete_webhook(webhook_id: str, user=Depends(get_current_user)):
+    result = await db.webhooks.delete_one({"_id": ObjectId(webhook_id), "user_id": user["_id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return {"message": "Webhook deleted"}
+
+@api_router.put("/webhooks/{webhook_id}/toggle")
+async def toggle_webhook(webhook_id: str, user=Depends(get_current_user)):
+    wh = await db.webhooks.find_one({"_id": ObjectId(webhook_id), "user_id": user["_id"]})
+    if not wh:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    await db.webhooks.update_one({"_id": ObjectId(webhook_id)}, {"$set": {"active": not wh.get("active", True)}})
+    return {"active": not wh.get("active", True)}
+
+# ─── Team Management ───
+@api_router.post("/team/invite")
+async def invite_team_member(data: TeamInviteRequest, user=Depends(get_current_user)):
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can invite team members")
+    email = data.email.lower().strip()
+    existing = await db.users.find_one({"email": email})
+    if existing:
+        raise HTTPException(status_code=400, detail="User already exists")
+    temp_password = secrets.token_urlsafe(8)
+    await db.users.insert_one({
+        "email": email,
+        "password_hash": hash_password(temp_password),
+        "name": data.name,
+        "role": data.role,
+        "team_id": user.get("team_id", user["_id"]),
+        "invited_by": user["_id"],
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    return {"email": email, "name": data.name, "role": data.role, "temp_password": temp_password}
+
+@api_router.get("/team/members")
+async def list_team_members(user=Depends(get_current_user)):
+    team_id = user.get("team_id", user["_id"])
+    members = await db.users.find(
+        {"$or": [{"team_id": team_id}, {"_id": ObjectId(user["_id"])}]},
+        {"_id": 1, "email": 1, "name": 1, "role": 1, "created_at": 1}
+    ).to_list(100)
+    result = []
+    for m in members:
+        m["id"] = str(m["_id"])
+        del m["_id"]
+        result.append(m)
+    return result
+
+@api_router.delete("/team/members/{member_id}")
+async def remove_team_member(member_id: str, user=Depends(get_current_user)):
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can remove team members")
+    if member_id == user["_id"]:
+        raise HTTPException(status_code=400, detail="Cannot remove yourself")
+    result = await db.users.delete_one({"_id": ObjectId(member_id)})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Member not found")
+    return {"message": "Member removed"}
+
+@api_router.put("/team/members/{member_id}/role")
+async def update_member_role(member_id: str, request: Request, user=Depends(get_current_user)):
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can change roles")
+    body = await request.json()
+    new_role = body.get("role", "agent")
+    await db.users.update_one({"_id": ObjectId(member_id)}, {"$set": {"role": new_role}})
+    return {"message": "Role updated"}
+
 @api_router.post("/api-keys")
 async def create_api_key(request: Request, user=Depends(get_current_user)):
     body = await request.json()
@@ -659,6 +934,7 @@ async def startup():
     await db.tasks.create_index("user_id")
     await db.activities.create_index([("user_id", 1), ("contact_id", 1)])
     await db.api_keys.create_index("key", unique=True)
+    await db.webhooks.create_index("user_id")
     # Seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@propflow.com")
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")

@@ -10,6 +10,7 @@ import ContactDetailPage from './pages/ContactDetailPage';
 import PipelinePage from './pages/PipelinePage';
 import PropertiesPage from './pages/PropertiesPage';
 import TasksPage from './pages/TasksPage';
+import CalendarPage from './pages/CalendarPage';
 import SettingsPage from './pages/SettingsPage';
 import { Toaster } from './components/ui/sonner';
 
@@ -48,6 +49,7 @@ function App() {
             <Route path="pipeline" element={<PipelinePage />} />
             <Route path="properties" element={<PropertiesPage />} />
             <Route path="tasks" element={<TasksPage />} />
+            <Route path="calendar" element={<CalendarPage />} />
             <Route path="settings" element={<SettingsPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
