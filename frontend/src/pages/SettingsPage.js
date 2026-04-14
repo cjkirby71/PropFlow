@@ -320,22 +320,22 @@ function WebhooksSection() {
 function IntegrationsSection() {
   return (
     <div className="space-y-4" data-testid="integrations-section">
-      {/* SendGrid */}
+      {/* Brevo */}
       <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5">
         <div className="flex items-start justify-between">
           <div className="flex items-start gap-3">
             <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0"><Globe className="w-5 h-5 text-blue-600" /></div>
             <div>
-              <h3 className="text-sm font-semibold text-slate-900">SendGrid Email</h3>
-              <p className="text-xs text-slate-500 mt-0.5">Send emails directly from PropFlow using your brokerage address</p>
+              <h3 className="text-sm font-semibold text-slate-900">Brevo Email</h3>
+              <p className="text-xs text-slate-500 mt-0.5">Send emails directly from PropFlow using your brokerage address (free: 300 emails/day)</p>
               <p className="text-xs text-slate-400 mt-1">Sender: craig@respaceteam.com</p>
             </div>
           </div>
           <Badge variant="outline" className="text-xs border-amber-200 text-amber-700">Add API Key</Badge>
         </div>
         <div className="mt-3 bg-slate-50 border border-slate-200 rounded-md p-3">
-          <p className="text-xs text-slate-600">To enable: Add <code className="bg-white px-1 rounded text-xs font-mono">SENDGRID_API_KEY</code> in your backend .env file.</p>
-          <p className="text-xs text-slate-500 mt-1">Get your key at <a href="https://app.sendgrid.com/settings/api_keys" target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">sendgrid.com</a></p>
+          <p className="text-xs text-slate-600">To enable: Add <code className="bg-white px-1 rounded text-xs font-mono">BREVO_API_KEY</code> in your backend .env file.</p>
+          <p className="text-xs text-slate-500 mt-1">Get your key at <a href="https://app.brevo.com/settings/keys/api" target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">brevo.com</a> (Settings &gt; SMTP & API &gt; API Keys)</p>
         </div>
       </div>
 

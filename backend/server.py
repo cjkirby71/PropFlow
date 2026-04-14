@@ -817,19 +817,27 @@ Make it professional, warm, and action-oriented."""
         logger.error(f"AI template generation error: {e}")
         raise HTTPException(status_code=500, detail=f"AI service error: {str(e)}")
 
-# ─── Email Sending (SendGrid) ───
+# ─── Email Sending (Brevo) ───
 @api_router.post("/email/send")
 async def send_email_endpoint(data: SendEmailRequest, background_tasks: BackgroundTasks, user=Depends(get_any_auth_user)):
-    sg_key = os.environ.get("SENDGRID_API_KEY", "")
-    sender = os.environ.get("SENDER_EMAIL", "")
-    if not sg_key or not sender:
-        raise HTTPException(status_code=503, detail="Email service not configured. Add SENDGRID_API_KEY and SENDER_EMAIL to .env")
+    brevo_key = os.environ.get("BREVO_API_KEY", "")
+    sender_email = os.environ.get("SENDER_EMAIL", "")
+    sender_name = os.environ.get("SENDER_NAME", "PropFlow CRM")
+    if not brevo_key or not sender_email:
+        raise HTTPException(status_code=503, detail="Email service not configured. Add BREVO_API_KEY and SENDER_EMAIL to .env")
     try:
-        from sendgrid import SendGridAPIClient
-        from sendgrid.helpers.mail import Mail
-        message = Mail(from_email=sender, to_emails=data.to_email, subject=data.subject, html_content=data.body.replace("\n", "<br>"))
-        sg = SendGridAPIClient(sg_key)
-        response = sg.send(message)
+        from brevo import Brevo
+        from brevo.transactional_emails import (
+            SendTransacEmailRequestSender,
+            SendTransacEmailRequestToItem,
+        )
+        brevo_client = Brevo(api_key=brevo_key)
+        response = brevo_client.transactional_emails.send_transac_email(
+            sender=SendTransacEmailRequestSender(email=sender_email, name=sender_name),
+            to=[SendTransacEmailRequestToItem(email=data.to_email)],
+            subject=data.subject,
+            html_content=data.body.replace("\n", "<br>"),
+        )
         # Log activity
         await db.activities.insert_one({
             "contact_id": data.contact_id, "user_id": user["_id"],
@@ -837,9 +845,9 @@ async def send_email_endpoint(data: SendEmailRequest, background_tasks: Backgrou
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
         background_tasks.add_task(trigger_webhooks, user["_id"], "email_sent", {"contact_id": data.contact_id, "subject": data.subject})
-        return {"success": True, "status_code": response.status_code}
+        return {"success": True, "message_id": getattr(response, 'message_id', 'sent')}
     except Exception as e:
-        logger.error(f"SendGrid error: {e}")
+        logger.error(f"Brevo email error: {e}")
         raise HTTPException(status_code=500, detail=f"Email sending failed: {str(e)}")
 
 # ─── SMS Sending (Twilio) ───
