@@ -1,0 +1,146 @@
+{
+  "theme": {
+    "mode": "light",
+    "archetype": "Archetype 4 (Swiss & High-Contrast)",
+    "mood": "Professional, authoritative, clean, data-first.",
+    "description": "A precise, command-center feel tailored for Real Estate professionals (Residential/Commercial). Prioritizes data legibility and operational clarity over decorative elements."
+  },
+  "typography": {
+    "fonts": {
+      "heading": "Cabinet Grotesk",
+      "body": "IBM Plex Sans",
+      "mono": "IBM Plex Mono"
+    },
+    "rules": {
+      "h1": "text-4xl sm:text-5xl tracking-tight font-bold text-slate-900",
+      "h2": "text-2xl sm:text-3xl tracking-tight font-semibold text-slate-900",
+      "h3": "text-xl sm:text-2xl tracking-tight font-medium text-slate-800",
+      "h4": "text-lg font-medium text-slate-800",
+      "body": "text-sm sm:text-base leading-relaxed text-slate-600 font-normal",
+      "labels": "text-xs font-semibold uppercase tracking-[0.2em] text-slate-500",
+      "anti_pattern": "DO NOT use Inter, Roboto, or Open Sans. Never center-align paragraphs."
+    }
+  },
+  "color_palette": {
+    "background": {
+      "app": "#F9FAFB",
+      "surface": "#FFFFFF",
+      "sidebar": "#F3F4F6",
+      "overlay": "rgba(17, 24, 39, 0.4)"
+    },
+    "text": {
+      "primary": "#111827",
+      "secondary": "#4B5563",
+      "tertiary": "#9CA3AF"
+    },
+    "brand": {
+      "primary": "#0F172A",
+      "primary_hover": "#334155",
+      "accent": "#2563EB",
+      "accent_hover": "#1D4ED8"
+    },
+    "ai_features": {
+      "highlight": "#F59E0B",
+      "surface": "#FEF3C7"
+    },
+    "pipeline_stages": {
+      "lead": "#E0E7FF",
+      "contacted": "#FEF08A",
+      "showing": "#D9F99D",
+      "offer": "#FED7AA",
+      "closed": "#BBF7D0"
+    },
+    "borders": {
+      "default": "#E5E7EB",
+      "active": "#94A3B8"
+    }
+  },
+  "layout_spacing": {
+    "strategy": "Dense Data Layout & The Control Room Grid",
+    "sidebar": "w-64 border-r border-slate-200 hidden md:flex",
+    "container": "max-w-[1600px] mx-auto p-4 sm:p-6 lg:p-8",
+    "grid_bento": "grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4 sm:gap-6",
+    "pipeline_board": "flex overflow-x-auto gap-4 h-[calc(100vh-140px)] pb-4",
+    "pipeline_column": "w-80 flex-shrink-0 flex flex-col gap-3 bg-slate-50 p-3 rounded-lg border border-slate-200",
+    "rules": "Containers with borders must have internal padding (p-4 or p-6). Avoid full-screen gradients. Use pure HTML/Tailwind for structural layout and Shadcn for interactive logic."
+  },
+  "components": {
+    "surfaces": {
+      "card": "bg-white border border-slate-200 shadow-sm rounded-lg",
+      "glass": "backdrop-blur-xl bg-white/80 border-b border-slate-200 shadow-sm"
+    },
+    "buttons": {
+      "primary": "bg-slate-900 text-white hover:bg-slate-800 rounded-md px-4 py-2 font-medium transition-colors focus:ring-2 focus:ring-slate-900 focus:ring-offset-2",
+      "secondary": "bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 hover:text-slate-900 rounded-md px-4 py-2 font-medium transition-colors",
+      "ai_action": "bg-amber-100 text-amber-900 border border-amber-200 hover:bg-amber-200 px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-2"
+    },
+    "forms": {
+      "input": "bg-white border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500",
+      "label": "text-sm font-medium text-slate-700 mb-1.5 block"
+    },
+    "tables": {
+      "container": "w-full text-left border-collapse",
+      "header": "bg-slate-50 border-y border-slate-200 text-xs font-semibold text-slate-500 uppercase tracking-wider py-3 px-4",
+      "row": "border-b border-slate-200 hover:bg-slate-50 transition-colors"
+    },
+    "icons": {
+      "library": "lucide-react",
+      "usage": "Use crisp, consistent stroke widths. For AI features, use the Sparkles icon."
+    }
+  },
+  "motion_and_interactions": {
+    "hover": "All interactive elements MUST have explicit hover states (e.g., hover:bg-slate-50).",
+    "transitions": "Use specific transition properties (transition-colors duration-200, transition-transform duration-200). DO NOT use 'transition-all'.",
+    "drag_drop": "Pipeline cards should scale slightly (scale-105) and gain a larger shadow (shadow-lg) while dragging.",
+    "dialogs": "Fade-in with slight upward translate for modals (animate-in fade-in zoom-in-95)."
+  },
+  "accessibility": {
+    "testing": "All interactive and key informational elements MUST include a data-testid attribute. Use kebab-case, role-based naming (e.g., data-testid='login-submit-button', data-testid='pipeline-deal-card', data-testid='sidebar-nav-link').",
+    "contrast": "Ensure text contrast meets APCA/WCAG standards. No gray-on-gray text for critical data.",
+    "focus": "All focusable elements must have visible focus rings (focus:ring-2)."
+  },
+  "media_urls": {
+    "residential_property_placeholders": [
+      {
+        "url": "https://images.unsplash.com/photo-1774685110718-c5b4fe026144?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzR8MHwxfHNlYXJjaHwxfHxtb2Rlcm4lMjBsdXh1cnklMjByZXNpZGVudGlhbCUyMGJ1aWxkaW5nJTIwZXh0ZXJpb3J8ZW58MHx8fHwxNzc2MTMzMDg1fDA&ixlib=rb-4.1.0&q=85",
+        "description": "Modern multi-story house with balconies (Residential Listings)"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1758193431355-54df41421657?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzR8MHwxfHNlYXJjaHwyfHxtb2Rlcm4lMjBsdXh1cnklMjByZXNpZGVudGlhbCUyMGJ1aWxkaW5nJTIwZXh0ZXJpb3J8ZW58MHx8fHwxNzc2MTMzMDg1fDA&ixlib=rb-4.1.0&q=85",
+        "description": "Modern building with glass facade (Residential Listings)"
+      }
+    ],
+    "commercial_property_placeholders": [
+      {
+        "url": "https://images.unsplash.com/photo-1758193017781-e3aee6c3e359?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1Nzd8MHwxfHNlYXJjaHwyfHxtb2Rlcm4lMjBjb21tZXJjaWFsJTIwb2ZmaWNlJTIwYnVpbGRpbmclMjBpbnRlcmlvcnxlbnwwfHx8fDE3NzYxMzMwODV8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Modern elevator lobby with marble and glass (Commercial Listings)"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1775178120107-a5abc21f742a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1Nzd8MHwxfHNlYXJjaHwxfHxtb2Rlcm4lMjBjb21tZXJjaWFsJTIwb2ZmaWNlJTIwYnVpbGRpbmclMjBpbnRlcmlvcnxlbnwwfHx8fDE3NzYxMzMwODV8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Modern interior with curved staircase (Commercial Listings)"
+      }
+    ],
+    "avatars": [
+      {
+        "url": "https://images.unsplash.com/photo-1762522926157-bcc04bf0b10a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjd8MHwxfHNlYXJjaHwyfHxwcm9mZXNzaW9uYWwlMjBwb3J0cmFpdCUyMGhlYWRzaG90fGVufDB8fHx8MTc3NjEzMzA4NXww&ixlib=rb-4.1.0&q=85",
+        "description": "Male avatar portrait (Agents/Leads)"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1769636929388-99eff95d3bf1?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjd8MHwxfHNlYXJjaHwzfHxwcm9mZXNzaW9uYWwlMjBwb3J0cmFpdCUyMGhlYWRzaG90fGVufDB8fHx8MTc3NjEzMzA4NXww&ixlib=rb-4.1.0&q=85",
+        "description": "Female avatar portrait (Agents/Leads)"
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Strictly adhere to the design guidelines. Start with Mobile-first responsive grids.",
+    "Setup Lucide-react for icons, use it for sidebar, pipeline items, and AI sparkle indicators.",
+    "For the Deal Pipeline: use 'react-beautiful-dnd' or '@hello-pangea/dnd' to create the drag-and-drop kanban board.",
+    "Shadcn customized rule: override component default border radiuses from standard to 'rounded-lg' or 'rounded-md' for a slightly softer but professional look.",
+    "Add 'data-testid' to every actionable button, navigation link, form input, deal card, and dialog trigger. This is critical for automated testing.",
+    "The dashboard must display the separated pipelines clearly via tabs or dropdowns: 'Residential Lease', 'Commercial Sale', 'Commercial Lease'.",
+    "Integrate a command palette / search for quick contact/property lookup.",
+    "Use Recharts or Tremor for the analytics dashboard widgets.",
+    "Provide empty states with clear CTAs (e.g., 'No deals in this stage. Add Deal').",
+    "Do not use generic Inter font. Update tailwind.config.js to use Cabinet Grotesk (sans) and IBM Plex Sans."
+  ]
+}
