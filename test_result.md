@@ -101,3 +101,80 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+
+user_problem_statement: "Add the same import/export ability that exists on properties page to contacts — including CSV/XLSX import, CSV export, and downloadable template"
+
+backend:
+  - task: "Contacts CSV export endpoint"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "Already existed, refactored with CONTACT_CSV_FIELDS constant"
+
+  - task: "Contacts import with CSV and XLSX support"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Updated /contacts/import to support XLSX/XLS in addition to CSV, returns total_rows count"
+        - working: true
+          agent: "testing"
+          comment: "✅ TESTED: CSV import successful (3/3 contacts imported), XLSX import successful (2/2 contacts imported), both return correct response format with imported/total_rows/errors fields. All imported contacts verified in contacts list."
+
+  - task: "Contacts downloadable template endpoint"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "New endpoint GET /contacts/template returns CSV template with example row"
+        - working: true
+          agent: "testing"
+          comment: "✅ TESTED: GET /contacts/template returns proper CSV file with correct headers [name,email,phone,company,source,property_type,tags,notes,lead_score] and example row (Jane Smith). Content-Type and Content-Disposition headers correct for file download."
+
+frontend:
+  - task: "Contacts page Template button and XLSX import support"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/pages/ContactsPage.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Added Template button, XLSX import support, total_rows in import alert"
+
+metadata:
+  created_by: "main_agent"
+  version: "1.0"
+  test_sequence: 2
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Contacts page Template button and XLSX import support"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    - agent: "main"
+      message: "Added 3 features to contacts import/export to match properties: 1) GET /contacts/template endpoint, 2) Updated POST /contacts/import to support XLSX/XLS files, 3) Import now returns total_rows. Auth: admin@propflow.com / admin123. Test the new template endpoint and import with both CSV and XLSX."
+    - agent: "testing"
+      message: "✅ BACKEND TESTING COMPLETE: All contacts import/export endpoints working perfectly. Template endpoint returns proper CSV with example data. CSV import tested with 3 contacts (100% success). XLSX import tested with 2 contacts (100% success). Export endpoint returns all contacts in CSV format. All 5 test contacts verified in system. Backend functionality is fully operational."

@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import api from '../lib/api';
-import { Plus, Search, Phone, Mail, Building, Tag, MoreHorizontal, Sparkles, Trash2, Edit, Download, Upload } from 'lucide-react';
+import { Plus, Search, Phone, Mail, Building, Tag, MoreHorizontal, Sparkles, Trash2, Edit, Download, Upload, FileSpreadsheet } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog';
@@ -69,6 +69,18 @@ export default function ContactsPage() {
     } catch (err) { alert('Export failed: ' + (err.response?.data?.detail || err.message)); }
   };
 
+  const handleDownloadTemplate = async () => {
+    try {
+      const response = await api.get('/contacts/template', { responseType: 'blob' });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'contact_import_template.csv';
+      a.click();
+      window.URL.revokeObjectURL(url);
+    } catch (err) { alert('Download failed'); }
+  };
+
   const handleImportCSV = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -76,7 +88,7 @@ export default function ContactsPage() {
     formData.append('file', file);
     try {
       const { data } = await api.post('/contacts/import', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
-      alert(`Imported ${data.imported} contacts.${data.errors?.length ? `\n\nErrors:\n${data.errors.join('\n')}` : ''}`);
+      alert(`Imported ${data.imported} of ${data.total_rows} contacts.${data.errors?.length ? `\n\nErrors:\n${data.errors.join('\n')}` : ''}`);
       fetchContacts();
     } catch (err) { alert('Import failed: ' + (err.response?.data?.detail || err.message)); }
     e.target.value = '';
@@ -93,11 +105,14 @@ export default function ContactsPage() {
           <Button variant="outline" size="sm" onClick={handleExportCSV} className="gap-1.5" data-testid="export-contacts-csv">
             <Download className="w-4 h-4" /> Export
           </Button>
+          <Button variant="outline" size="sm" onClick={handleDownloadTemplate} className="gap-1.5" data-testid="download-contact-template-btn">
+            <FileSpreadsheet className="w-4 h-4" /> Template
+          </Button>
           <label className="cursor-pointer">
             <Button variant="outline" size="sm" className="gap-1.5 pointer-events-none" data-testid="import-contacts-csv">
               <Upload className="w-4 h-4" /> Import
             </Button>
-            <input type="file" accept=".csv" onChange={handleImportCSV} className="hidden" />
+            <input type="file" accept=".csv,.xlsx,.xls" onChange={handleImportCSV} className="hidden" />
           </label>
           <Dialog open={showAdd} onOpenChange={setShowAdd}>
             <DialogTrigger asChild>

@@ -350,11 +350,13 @@ async def list_contacts(user=Depends(get_any_auth_user), search: str = "", prope
     contacts = await db.contacts.find(query).sort("created_at", -1).to_list(500)
     return [serialize_doc(c) for c in contacts]
 
+CONTACT_CSV_FIELDS = ["name", "email", "phone", "company", "source", "property_type", "tags", "notes", "lead_score"]
+
 @api_router.get("/contacts/export")
 async def export_contacts_csv(user=Depends(get_any_auth_user)):
     contacts = await db.contacts.find({"user_id": user["_id"]}).to_list(5000)
     output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=["name", "email", "phone", "company", "source", "property_type", "tags", "notes", "lead_score"])
+    writer = csv.DictWriter(output, fieldnames=CONTACT_CSV_FIELDS)
     writer.writeheader()
     for c in contacts:
         writer.writerow({
@@ -373,6 +375,23 @@ async def export_contacts_csv(user=Depends(get_any_auth_user)):
         io.BytesIO(output.getvalue().encode()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=contacts_export.csv"}
+    )
+
+@api_router.get("/contacts/template")
+async def get_contact_import_template():
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=CONTACT_CSV_FIELDS)
+    writer.writeheader()
+    writer.writerow({
+        "name": "Jane Smith", "email": "jane@example.com", "phone": "(555) 123-4567",
+        "company": "Acme Realty", "source": "website", "property_type": "residential_lease",
+        "tags": "vip,relocating", "notes": "Looking for 2BR downtown", "lead_score": "0"
+    })
+    output.seek(0)
+    return StreamingResponse(
+        io.BytesIO(output.getvalue().encode()),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=contact_import_template.csv"}
     )
 
 @api_router.get("/contacts/{contact_id}")
@@ -796,38 +815,66 @@ async def trigger_webhooks(user_id: str, event: str, payload: dict):
             except Exception as e:
                 logger.error(f"Webhook {wh.get('name','')} failed: {e}")
 
-# ─── CSV Import/Export ───
+# ─── CSV/XLSX Import ───
 @api_router.post("/contacts/import")
-async def import_contacts_csv(file: UploadFile = File(...), user=Depends(get_any_auth_user)):
+async def import_contacts(file: UploadFile = File(...), user=Depends(get_any_auth_user)):
     content = await file.read()
-    text = content.decode("utf-8")
-    reader = csv.DictReader(io.StringIO(text))
+    filename = file.filename or ""
+    rows = []
+    try:
+        if filename.endswith(".xlsx") or filename.endswith(".xls"):
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+            ws = wb.active
+            headers = []
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                if i == 0:
+                    headers = [str(c).strip().lower().replace(" ", "_") if c else "" for c in row]
+                    continue
+                rows.append(dict(zip(headers, [c if c is not None else "" for c in row])))
+            wb.close()
+        else:
+            text = content.decode("utf-8")
+            reader = csv.DictReader(io.StringIO(text))
+            for row in reader:
+                rows.append(row)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to parse file: {str(e)}")
     imported = 0
     errors_list = []
-    for i, row in enumerate(reader):
+    for i, row in enumerate(rows):
         try:
+            name = str(row.get("name", "")).strip()
+            if not name:
+                errors_list.append(f"Row {i+1}: Missing name")
+                continue
+            source_val = str(row.get("source", "csv_import")).strip()
+            if not source_val:
+                source_val = "csv_import"
+            prop_type = str(row.get("property_type", "residential_lease")).strip()
+            if prop_type not in ("residential_lease", "commercial_sale", "commercial_lease"):
+                prop_type = "residential_lease"
+            tags_raw = str(row.get("tags", "")).strip()
+            tags = [t.strip() for t in tags_raw.split(",") if t.strip()] if tags_raw else []
             doc = {
-                "name": row.get("name", "").strip(),
-                "email": row.get("email", "").strip(),
-                "phone": row.get("phone", "").strip(),
-                "company": row.get("company", "").strip(),
-                "source": row.get("source", "csv_import").strip(),
-                "property_type": row.get("property_type", "residential_lease").strip(),
-                "tags": [t.strip() for t in row.get("tags", "").split(",") if t.strip()],
-                "notes": row.get("notes", "").strip(),
+                "name": name,
+                "email": str(row.get("email", "")).strip(),
+                "phone": str(row.get("phone", "")).strip(),
+                "company": str(row.get("company", "")).strip(),
+                "source": source_val,
+                "property_type": prop_type,
+                "tags": tags,
+                "notes": str(row.get("notes", "")).strip(),
                 "lead_score": int(row.get("lead_score", 0) or 0),
                 "user_id": user["_id"],
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
-            if not doc["name"]:
-                errors_list.append(f"Row {i+1}: Missing name")
-                continue
             await db.contacts.insert_one(doc)
             imported += 1
         except Exception as e:
             errors_list.append(f"Row {i+1}: {str(e)}")
-    return {"imported": imported, "errors": errors_list}
+    return {"imported": imported, "total_rows": len(rows), "errors": errors_list}
 
 # ─── Message Templates ───
 @api_router.post("/templates")
