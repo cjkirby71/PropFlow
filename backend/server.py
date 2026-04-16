@@ -420,6 +420,105 @@ async def list_properties(user=Depends(get_any_auth_user), property_type: str = 
     props = await db.properties.find(query).sort("created_at", -1).to_list(500)
     return [serialize_doc(p) for p in props]
 
+# ─── Property Import/Export (must be before {property_id} routes) ───
+PROPERTY_CSV_FIELDS = ["name", "address", "property_type", "listing_type", "price", "sqft", "bedrooms", "bathrooms", "status", "description", "image_url"]
+
+@api_router.post("/properties/import")
+async def import_properties(file: UploadFile = File(...), user=Depends(get_any_auth_user)):
+    content = await file.read()
+    filename = file.filename or ""
+    rows = []
+    try:
+        if filename.endswith(".xlsx") or filename.endswith(".xls"):
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+            ws = wb.active
+            headers = []
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                if i == 0:
+                    headers = [str(c).strip().lower().replace(" ", "_") if c else "" for c in row]
+                    continue
+                rows.append(dict(zip(headers, [c if c is not None else "" for c in row])))
+            wb.close()
+        else:
+            text = content.decode("utf-8")
+            reader = csv.DictReader(io.StringIO(text))
+            for row in reader:
+                rows.append(row)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to parse file: {str(e)}")
+    imported = 0
+    errors_list = []
+    for i, row in enumerate(rows):
+        try:
+            name = str(row.get("name", "")).strip()
+            address = str(row.get("address", "")).strip()
+            if not name and not address:
+                errors_list.append(f"Row {i+1}: Missing name and address")
+                continue
+            prop_type = str(row.get("property_type", "residential")).strip().lower()
+            if prop_type not in ("residential", "commercial"):
+                prop_type = "residential"
+            list_type = str(row.get("listing_type", "lease")).strip().lower()
+            if list_type not in ("lease", "sale"):
+                list_type = "lease"
+            status_val = str(row.get("status", "active")).strip().lower()
+            if status_val not in ("active", "pending", "closed"):
+                status_val = "active"
+            doc = {
+                "name": name or address.split(",")[0],
+                "address": address,
+                "property_type": prop_type,
+                "listing_type": list_type,
+                "price": float(row.get("price", 0) or 0),
+                "sqft": float(row.get("sqft", 0) or 0),
+                "bedrooms": int(row.get("bedrooms", 0) or 0),
+                "bathrooms": int(row.get("bathrooms", 0) or 0),
+                "status": status_val,
+                "description": str(row.get("description", "")).strip(),
+                "image_url": str(row.get("image_url", "")).strip(),
+                "user_id": user["_id"],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await db.properties.insert_one(doc)
+            imported += 1
+        except Exception as e:
+            errors_list.append(f"Row {i+1}: {str(e)}")
+    return {"imported": imported, "total_rows": len(rows), "errors": errors_list}
+
+@api_router.get("/properties/export")
+async def export_properties(user=Depends(get_any_auth_user)):
+    props = await db.properties.find({"user_id": user["_id"]}).to_list(5000)
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=PROPERTY_CSV_FIELDS)
+    writer.writeheader()
+    for p in props:
+        writer.writerow({f: p.get(f, "") for f in PROPERTY_CSV_FIELDS})
+    output.seek(0)
+    return StreamingResponse(
+        io.BytesIO(output.getvalue().encode()),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=properties_export.csv"}
+    )
+
+@api_router.get("/properties/template")
+async def get_property_import_template():
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=PROPERTY_CSV_FIELDS)
+    writer.writeheader()
+    writer.writerow({
+        "name": "Example Office Suite A", "address": "123 Main St, Suite 100, City, ST 12345",
+        "property_type": "commercial", "listing_type": "lease", "price": "3500",
+        "sqft": "1200", "bedrooms": "0", "bathrooms": "1", "status": "active",
+        "description": "Corner office with city views", "image_url": ""
+    })
+    output.seek(0)
+    return StreamingResponse(
+        io.BytesIO(output.getvalue().encode()),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=property_import_template.csv"}
+    )
+
 @api_router.get("/properties/{property_id}")
 async def get_property(property_id: str, user=Depends(get_any_auth_user)):
     prop = await db.properties.find_one({"_id": ObjectId(property_id), "user_id": user["_id"]})

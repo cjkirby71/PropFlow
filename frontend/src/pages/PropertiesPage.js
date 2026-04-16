@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import api from '../lib/api';
-import { Plus, Building2, MapPin, DollarSign, MoreHorizontal, Trash2, Edit, Search } from 'lucide-react';
+import { Plus, Building2, MapPin, DollarSign, MoreHorizontal, Trash2, Edit, Search, Download, Upload, FileSpreadsheet } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog';
@@ -38,6 +38,43 @@ export default function PropertiesPage() {
     fetchProps();
   };
 
+  const handleExport = async () => {
+    try {
+      const response = await api.get('/properties/export', { responseType: 'blob' });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'properties_export.csv';
+      a.click();
+      window.URL.revokeObjectURL(url);
+    } catch (err) { alert('Export failed: ' + (err.response?.data?.detail || err.message)); }
+  };
+
+  const handleDownloadTemplate = async () => {
+    try {
+      const response = await api.get('/properties/template', { responseType: 'blob' });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'property_import_template.csv';
+      a.click();
+      window.URL.revokeObjectURL(url);
+    } catch (err) { alert('Download failed'); }
+  };
+
+  const handleImport = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const { data } = await api.post('/properties/import', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+      alert(`Imported ${data.imported} of ${data.total_rows} properties.${data.errors?.length ? `\n\nErrors:\n${data.errors.join('\n')}` : ''}`);
+      fetchProps();
+    } catch (err) { alert('Import failed: ' + (err.response?.data?.detail || err.message)); }
+    e.target.value = '';
+  };
+
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-[1600px] mx-auto space-y-5" data-testid="properties-page">
       <div className="flex items-center justify-between flex-wrap gap-3">
@@ -45,17 +82,31 @@ export default function PropertiesPage() {
           <h1 className="font-heading text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">Properties</h1>
           <p className="text-sm text-slate-500 mt-1">{properties.length} listings</p>
         </div>
-        <Dialog open={showAdd} onOpenChange={setShowAdd}>
-          <DialogTrigger asChild>
-            <Button className="bg-slate-900 text-white hover:bg-slate-800 gap-2" data-testid="add-property-button">
-              <Plus className="w-4 h-4" /> Add Property
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={handleExport} className="gap-1.5" data-testid="export-properties-btn">
+            <Download className="w-4 h-4" /> Export
+          </Button>
+          <Button variant="outline" size="sm" onClick={handleDownloadTemplate} className="gap-1.5" data-testid="download-property-template-btn">
+            <FileSpreadsheet className="w-4 h-4" /> Template
+          </Button>
+          <label className="cursor-pointer">
+            <Button variant="outline" size="sm" className="gap-1.5 pointer-events-none" data-testid="import-properties-btn">
+              <Upload className="w-4 h-4" /> Import
             </Button>
-          </DialogTrigger>
+            <input type="file" accept=".csv,.xlsx,.xls" onChange={handleImport} className="hidden" />
+          </label>
+          <Dialog open={showAdd} onOpenChange={setShowAdd}>
+            <DialogTrigger asChild>
+              <Button className="bg-slate-900 text-white hover:bg-slate-800 gap-2" data-testid="add-property-button">
+                <Plus className="w-4 h-4" /> Add Property
+              </Button>
+            </DialogTrigger>
           <DialogContent className="sm:max-w-lg" data-testid="add-property-dialog">
             <DialogHeader><DialogTitle>Add Property</DialogTitle></DialogHeader>
             <PropertyForm onSubmit={async (d) => { await api.post('/properties', d); setShowAdd(false); fetchProps(); }} />
           </DialogContent>
-        </Dialog>
+          </Dialog>
+        </div>
       </div>
 
       {/* Filters */}
