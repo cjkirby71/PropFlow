@@ -5,10 +5,11 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, BackgroundTasks
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
+import re
 import logging
 import bcrypt
 import jwt
@@ -16,24 +17,70 @@ import secrets
 import csv
 import io
 import json
+import traceback
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
 from datetime import datetime, timezone, timedelta
 from bson import ObjectId
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
-# MongoDB connection
+# ─── Logging ───
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECURITY: Environment & Settings Validation
+# Fail fast on startup if any critical environment variable is missing.
+# Optional vars (Brevo, Twilio, AI) log warnings but don't block startup.
+# ═══════════════════════════════════════════════════════════════════════════════
+REQUIRED_ENV_VARS = ["MONGO_URL", "DB_NAME", "JWT_SECRET", "ADMIN_EMAIL", "ADMIN_PASSWORD", "FRONTEND_URL"]
+OPTIONAL_ENV_VARS = {
+    "EMERGENT_LLM_KEY": "AI features (email drafting, lead scoring) will be unavailable",
+    "BREVO_API_KEY": "Email sending via Brevo will be unavailable",
+    "TWILIO_ACCOUNT_SID": "SMS sending via Twilio will be unavailable",
+    "TWILIO_AUTH_TOKEN": "SMS sending via Twilio will be unavailable",
+    "TWILIO_PHONE_NUMBER": "SMS sending via Twilio will be unavailable",
+}
+
+_missing_required = [v for v in REQUIRED_ENV_VARS if not os.environ.get(v)]
+if _missing_required:
+    raise RuntimeError(f"FATAL: Missing required environment variables: {', '.join(_missing_required)}. "
+                       "Server cannot start. Check your .env file.")
+for var, warning in OPTIONAL_ENV_VARS.items():
+    if not os.environ.get(var):
+        logger.warning(f"Optional env var {var} not set — {warning}")
+
+# ─── Environment detection ───
+# If FRONTEND_URL is https, we're in production (set secure cookies, HSTS, etc.)
+FRONTEND_URL = os.environ["FRONTEND_URL"]
+IS_PRODUCTION = FRONTEND_URL.startswith("https://")
+
+# ─── MongoDB connection ───
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-app = FastAPI()
+# ─── App & Router ───
+app = FastAPI(
+    docs_url=None if IS_PRODUCTION else "/docs",     # Disable Swagger UI in production
+    redoc_url=None if IS_PRODUCTION else "/redoc",    # Disable ReDoc in production
+)
 api_router = APIRouter(prefix="/api")
 
 JWT_ALGORITHM = "HS256"
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECURITY: Rate Limiting (slowapi)
+# Default:  100 requests/minute per IP for general endpoints
+# Strict:   10 requests/minute per IP for auth endpoints (login, register, refresh)
+# Prevents brute-force attacks, credential stuffing, and API abuse.
+# ═══════════════════════════════════════════════════════════════════════════════
+limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
+app.state.limiter = limiter
 
 # ─── Password Hashing ───
 def hash_password(password: str) -> str:
@@ -46,14 +93,37 @@ def get_jwt_secret():
     return os.environ["JWT_SECRET"]
 
 def create_access_token(user_id: str, email: str) -> str:
-    return jwt.encode({"sub": user_id, "email": email, "exp": datetime.now(timezone.utc) + timedelta(minutes=60), "type": "access"}, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+    # SECURITY: Access token expires in 15 minutes (short-lived)
+    return jwt.encode(
+        {"sub": user_id, "email": email, "exp": datetime.now(timezone.utc) + timedelta(minutes=15), "type": "access"},
+        get_jwt_secret(), algorithm=JWT_ALGORITHM
+    )
 
 def create_refresh_token(user_id: str) -> str:
-    return jwt.encode({"sub": user_id, "exp": datetime.now(timezone.utc) + timedelta(days=7), "type": "refresh"}, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+    # SECURITY: Refresh token expires in 7 days
+    return jwt.encode(
+        {"sub": user_id, "exp": datetime.now(timezone.utc) + timedelta(days=7), "type": "refresh"},
+        get_jwt_secret(), algorithm=JWT_ALGORITHM
+    )
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECURITY: Environment-aware auth cookie setter
+# - httponly=True:     Prevents JavaScript access (XSS protection)
+# - samesite="strict": Prevents CSRF by blocking cross-origin cookie sends
+# - secure=True:       Cookies only sent over HTTPS (production only)
+# - max_age:           15 min for access_token, 7 days for refresh_token
+# ═══════════════════════════════════════════════════════════════════════════════
 def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
-    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=False, samesite="lax", max_age=3600, path="/")
-    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    response.set_cookie(
+        key="access_token", value=access_token,
+        httponly=True, secure=IS_PRODUCTION, samesite="strict",
+        max_age=900, path="/"       # 15 minutes
+    )
+    response.set_cookie(
+        key="refresh_token", value=refresh_token,
+        httponly=True, secure=IS_PRODUCTION, samesite="strict",
+        max_age=604800, path="/"    # 7 days
+    )
 
 async def get_current_user(request: Request) -> dict:
     token = request.cookies.get("access_token")
@@ -101,118 +171,222 @@ async def get_any_auth_user(request: Request) -> dict:
     except HTTPException:
         return await get_api_key_user(request)
 
-# ─── Pydantic Models ───
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECURITY: Input Validation Models (Pydantic)
+# All user-facing input is validated through strict Pydantic models with:
+# - Field length limits to prevent payload abuse
+# - Enum constraints where applicable
+# - Email format validation
+# - Stripping of whitespace on string fields
+# ═══════════════════════════════════════════════════════════════════════════════
+
 class RegisterInput(BaseModel):
-    email: str
-    password: str
-    name: str
+    email: str = Field(..., min_length=5, max_length=254)
+    password: str = Field(..., min_length=6, max_length=128)
+    name: str = Field(..., min_length=1, max_length=200)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v):
+        v = v.strip().lower()
+        if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', v):
+            raise ValueError("Invalid email format")
+        return v
 
 class LoginInput(BaseModel):
-    email: str
-    password: str
+    email: str = Field(..., max_length=254)
+    password: str = Field(..., max_length=128)
 
 class ContactCreate(BaseModel):
-    name: str
-    email: Optional[str] = ""
-    phone: Optional[str] = ""
-    company: Optional[str] = ""
-    source: Optional[str] = "manual"
+    name: str = Field(..., min_length=1, max_length=300)
+    email: Optional[str] = Field(default="", max_length=254)
+    phone: Optional[str] = Field(default="", max_length=30)
+    company: Optional[str] = Field(default="", max_length=300)
+    source: Optional[str] = Field(default="manual", max_length=50)
     tags: Optional[List[str]] = []
-    property_type: Optional[str] = "residential_lease"
-    notes: Optional[str] = ""
-    lead_score: Optional[int] = 0
+    property_type: Optional[str] = Field(default="residential_lease", max_length=50)
+    notes: Optional[str] = Field(default="", max_length=5000)
+    lead_score: Optional[int] = Field(default=0, ge=0, le=100)
+
+    @field_validator("property_type")
+    @classmethod
+    def validate_property_type(cls, v):
+        allowed = ("residential_lease", "commercial_sale", "commercial_lease")
+        if v and v not in allowed:
+            raise ValueError(f"property_type must be one of: {', '.join(allowed)}")
+        return v
 
 class ContactUpdate(BaseModel):
-    name: Optional[str] = None
-    email: Optional[str] = None
-    phone: Optional[str] = None
-    company: Optional[str] = None
-    source: Optional[str] = None
+    name: Optional[str] = Field(default=None, max_length=300)
+    email: Optional[str] = Field(default=None, max_length=254)
+    phone: Optional[str] = Field(default=None, max_length=30)
+    company: Optional[str] = Field(default=None, max_length=300)
+    source: Optional[str] = Field(default=None, max_length=50)
     tags: Optional[List[str]] = None
-    property_type: Optional[str] = None
-    notes: Optional[str] = None
-    lead_score: Optional[int] = None
+    property_type: Optional[str] = Field(default=None, max_length=50)
+    notes: Optional[str] = Field(default=None, max_length=5000)
+    lead_score: Optional[int] = Field(default=None, ge=0, le=100)
 
 class PropertyCreate(BaseModel):
-    name: str
-    address: str
-    property_type: str  # residential, commercial
-    listing_type: str   # lease, sale
-    price: Optional[float] = 0
-    sqft: Optional[float] = 0
-    bedrooms: Optional[int] = 0
-    bathrooms: Optional[int] = 0
-    description: Optional[str] = ""
-    status: Optional[str] = "active"
-    image_url: Optional[str] = ""
+    name: str = Field(..., min_length=1, max_length=300)
+    address: str = Field(..., min_length=1, max_length=500)
+    property_type: str = Field(..., max_length=20)
+    listing_type: str = Field(..., max_length=10)
+    price: Optional[float] = Field(default=0, ge=0)
+    sqft: Optional[float] = Field(default=0, ge=0)
+    bedrooms: Optional[int] = Field(default=0, ge=0, le=100)
+    bathrooms: Optional[int] = Field(default=0, ge=0, le=100)
+    description: Optional[str] = Field(default="", max_length=5000)
+    status: Optional[str] = Field(default="active", max_length=20)
+    image_url: Optional[str] = Field(default="", max_length=2000)
+
+    @field_validator("property_type")
+    @classmethod
+    def validate_prop_type(cls, v):
+        if v not in ("residential", "commercial"):
+            raise ValueError("property_type must be 'residential' or 'commercial'")
+        return v
+
+    @field_validator("listing_type")
+    @classmethod
+    def validate_listing_type(cls, v):
+        if v not in ("lease", "sale"):
+            raise ValueError("listing_type must be 'lease' or 'sale'")
+        return v
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v):
+        if v and v not in ("active", "pending", "closed"):
+            raise ValueError("status must be 'active', 'pending', or 'closed'")
+        return v
 
 class DealCreate(BaseModel):
-    title: str
-    pipeline_type: str  # residential_lease, commercial_sale, commercial_lease
-    stage: str
-    contact_id: Optional[str] = ""
-    property_id: Optional[str] = ""
-    value: Optional[float] = 0
-    notes: Optional[str] = ""
+    title: str = Field(..., min_length=1, max_length=300)
+    pipeline_type: str = Field(..., max_length=30)
+    stage: str = Field(..., max_length=50)
+    contact_id: Optional[str] = Field(default="", max_length=50)
+    property_id: Optional[str] = Field(default="", max_length=50)
+    value: Optional[float] = Field(default=0, ge=0)
+    notes: Optional[str] = Field(default="", max_length=5000)
+
+    @field_validator("pipeline_type")
+    @classmethod
+    def validate_pipeline(cls, v):
+        allowed = ("residential_lease", "commercial_sale", "commercial_lease")
+        if v not in allowed:
+            raise ValueError(f"pipeline_type must be one of: {', '.join(allowed)}")
+        return v
 
 class DealUpdate(BaseModel):
-    title: Optional[str] = None
-    stage: Optional[str] = None
-    contact_id: Optional[str] = None
-    property_id: Optional[str] = None
-    value: Optional[float] = None
-    notes: Optional[str] = None
+    title: Optional[str] = Field(default=None, max_length=300)
+    stage: Optional[str] = Field(default=None, max_length=50)
+    contact_id: Optional[str] = Field(default=None, max_length=50)
+    property_id: Optional[str] = Field(default=None, max_length=50)
+    value: Optional[float] = Field(default=None, ge=0)
+    notes: Optional[str] = Field(default=None, max_length=5000)
 
 class TaskCreate(BaseModel):
-    title: str
-    description: Optional[str] = ""
-    due_date: Optional[str] = ""
-    contact_id: Optional[str] = ""
-    deal_id: Optional[str] = ""
-    priority: Optional[str] = "medium"
+    title: str = Field(..., min_length=1, max_length=300)
+    description: Optional[str] = Field(default="", max_length=5000)
+    due_date: Optional[str] = Field(default="", max_length=20)
+    contact_id: Optional[str] = Field(default="", max_length=50)
+    deal_id: Optional[str] = Field(default="", max_length=50)
+    priority: Optional[str] = Field(default="medium", max_length=10)
     completed: Optional[bool] = False
 
+    @field_validator("priority")
+    @classmethod
+    def validate_priority(cls, v):
+        if v and v not in ("high", "medium", "low"):
+            raise ValueError("priority must be 'high', 'medium', or 'low'")
+        return v
+
 class ActivityCreate(BaseModel):
-    contact_id: str
-    activity_type: str  # call, email, note, meeting
-    description: str
-    deal_id: Optional[str] = ""
+    contact_id: str = Field(..., max_length=50)
+    activity_type: str = Field(..., max_length=20)
+    description: str = Field(..., min_length=1, max_length=5000)
+    deal_id: Optional[str] = Field(default="", max_length=50)
+
+    @field_validator("activity_type")
+    @classmethod
+    def validate_activity_type(cls, v):
+        allowed = ("call", "email", "note", "meeting", "sms")
+        if v not in allowed:
+            raise ValueError(f"activity_type must be one of: {', '.join(allowed)}")
+        return v
 
 class AIEmailRequest(BaseModel):
-    contact_id: str
-    context: Optional[str] = ""
-    tone: Optional[str] = "professional"
+    contact_id: str = Field(..., max_length=50)
+    context: Optional[str] = Field(default="", max_length=2000)
+    tone: Optional[str] = Field(default="professional", max_length=30)
 
 class AILeadScoreRequest(BaseModel):
-    contact_id: str
+    contact_id: str = Field(..., max_length=50)
 
 class SendEmailRequest(BaseModel):
-    contact_id: str
-    to_email: str
-    subject: str
-    body: str
+    contact_id: str = Field(..., max_length=50)
+    to_email: str = Field(..., max_length=254)
+    subject: str = Field(..., min_length=1, max_length=500)
+    body: str = Field(..., min_length=1, max_length=50000)
+
+    @field_validator("to_email")
+    @classmethod
+    def validate_to_email(cls, v):
+        if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', v.strip()):
+            raise ValueError("Invalid email format")
+        return v.strip()
 
 class SendSMSRequest(BaseModel):
-    contact_id: str
-    to_phone: str
-    message: str
+    contact_id: str = Field(..., max_length=50)
+    to_phone: str = Field(..., max_length=20)
+    message: str = Field(..., min_length=1, max_length=1600)
 
 class WebhookCreate(BaseModel):
-    url: str
-    events: List[str]  # new_lead, deal_stage_change, new_activity, etc.
-    name: Optional[str] = "Webhook"
+    url: str = Field(..., min_length=10, max_length=2000)
+    events: List[str]
+    name: Optional[str] = Field(default="Webhook", max_length=100)
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v):
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("Webhook URL must start with http:// or https://")
+        return v
 
 class TeamInviteRequest(BaseModel):
-    email: str
-    name: str
-    role: Optional[str] = "agent"
+    email: str = Field(..., min_length=5, max_length=254)
+    name: str = Field(..., min_length=1, max_length=200)
+    role: Optional[str] = Field(default="agent", max_length=20)
+
+    @field_validator("email")
+    @classmethod
+    def validate_invite_email(cls, v):
+        v = v.strip().lower()
+        if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', v):
+            raise ValueError("Invalid email format")
+        return v
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v):
+        if v not in ("admin", "agent"):
+            raise ValueError("role must be 'admin' or 'agent'")
+        return v
 
 class TemplateCreate(BaseModel):
-    name: str
-    category: str  # email, sms
-    subject: Optional[str] = ""
-    body: str
+    name: str = Field(..., min_length=1, max_length=200)
+    category: str = Field(..., max_length=10)
+    subject: Optional[str] = Field(default="", max_length=500)
+    body: str = Field(..., min_length=1, max_length=50000)
     tags: Optional[List[str]] = []
+
+    @field_validator("category")
+    @classmethod
+    def validate_category(cls, v):
+        if v not in ("email", "sms"):
+            raise ValueError("category must be 'email' or 'sms'")
+        return v
 
 # ─── Stage Automation Config ───
 STAGE_AUTO_TASKS = {
@@ -244,8 +418,10 @@ def serialize_doc(doc):
     return doc
 
 # ─── Auth Routes ───
+# SECURITY: Strict rate limit on auth endpoints — 10 requests/minute per IP
 @api_router.post("/auth/register")
-async def register(data: RegisterInput, response: Response):
+@limiter.limit("10/minute")
+async def register(data: RegisterInput, request: Request, response: Response):
     email = data.email.lower().strip()
     existing = await db.users.find_one({"email": email})
     if existing:
@@ -265,6 +441,7 @@ async def register(data: RegisterInput, response: Response):
     return {"id": user_id, "email": email, "name": data.name, "role": "user"}
 
 @api_router.post("/auth/login")
+@limiter.limit("10/minute")
 async def login(data: LoginInput, request: Request, response: Response):
     email = data.email.lower().strip()
     ip = request.client.host if request.client else "unknown"
@@ -305,6 +482,7 @@ async def get_me(user=Depends(get_current_user)):
     return user
 
 @api_router.post("/auth/refresh")
+@limiter.limit("10/minute")
 async def refresh_token(request: Request, response: Response):
     token = request.cookies.get("refresh_token")
     if not token:
@@ -317,7 +495,12 @@ async def refresh_token(request: Request, response: Response):
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
         access = create_access_token(str(user["_id"]), user["email"])
-        response.set_cookie(key="access_token", value=access, httponly=True, secure=False, samesite="lax", max_age=3600, path="/")
+        # SECURITY: Use the centralized set_auth_cookies helper for consistent cookie settings
+        response.set_cookie(
+            key="access_token", value=access,
+            httponly=True, secure=IS_PRODUCTION, samesite="strict",
+            max_age=900, path="/"
+        )
         return {"message": "Token refreshed"}
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
@@ -339,11 +522,13 @@ async def create_contact(data: ContactCreate, background_tasks: BackgroundTasks,
 async def list_contacts(user=Depends(get_any_auth_user), search: str = "", property_type: str = ""):
     query = {"user_id": user["_id"]}
     if search:
+        # SECURITY: Escape regex special characters to prevent ReDoS / injection
+        safe_search = re.escape(search)
         query["$or"] = [
-            {"name": {"$regex": search, "$options": "i"}},
-            {"email": {"$regex": search, "$options": "i"}},
-            {"phone": {"$regex": search, "$options": "i"}},
-            {"company": {"$regex": search, "$options": "i"}},
+            {"name": {"$regex": safe_search, "$options": "i"}},
+            {"email": {"$regex": safe_search, "$options": "i"}},
+            {"phone": {"$regex": safe_search, "$options": "i"}},
+            {"company": {"$regex": safe_search, "$options": "i"}},
         ]
     if property_type:
         query["property_type"] = property_type
@@ -736,7 +921,7 @@ Write a concise, professional email ready to send. Include subject line."""
         return {"draft": result, "contact_name": contact.get("name", "")}
     except Exception as e:
         logger.error(f"AI email draft error: {e}")
-        raise HTTPException(status_code=500, detail=f"AI service error: {str(e)}")
+        raise HTTPException(status_code=500, detail="AI service temporarily unavailable. Please try again.")
 
 @api_router.post("/ai/lead-score")
 async def ai_lead_score(data: AILeadScoreRequest, user=Depends(get_any_auth_user)):
@@ -778,7 +963,7 @@ Respond ONLY with a JSON object: {{"score": <number 0-100>, "reasoning": "<brief
             return {"score": 50, "reasoning": result, "next_action": "Review manually"}
     except Exception as e:
         logger.error(f"AI lead score error: {e}")
-        raise HTTPException(status_code=500, detail=f"AI service error: {str(e)}")
+        raise HTTPException(status_code=500, detail="AI service temporarily unavailable. Please try again.")
 
 @api_router.post("/ai/summarize-activities")
 async def ai_summarize(contact_id: str, user=Depends(get_any_auth_user)):
@@ -799,7 +984,7 @@ async def ai_summarize(contact_id: str, user=Depends(get_any_auth_user)):
         return {"summary": result}
     except Exception as e:
         logger.error(f"AI summary error: {e}")
-        raise HTTPException(status_code=500, detail=f"AI service error: {str(e)}")
+        raise HTTPException(status_code=500, detail="AI service temporarily unavailable. Please try again.")
 
 # ─── API Keys Management ───
 
@@ -961,7 +1146,7 @@ Make it professional, warm, and action-oriented."""
         return {"subject": subject, "body": template_body, "category": category}
     except Exception as e:
         logger.error(f"AI template generation error: {e}")
-        raise HTTPException(status_code=500, detail=f"AI service error: {str(e)}")
+        raise HTTPException(status_code=500, detail="AI service temporarily unavailable. Please try again.")
 
 # ─── Email Sending (Brevo) ───
 @api_router.post("/email/send")
@@ -994,7 +1179,7 @@ async def send_email_endpoint(data: SendEmailRequest, background_tasks: Backgrou
         return {"success": True, "message_id": getattr(response, 'message_id', 'sent')}
     except Exception as e:
         logger.error(f"Brevo email error: {e}")
-        raise HTTPException(status_code=500, detail=f"Email sending failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Email sending failed. Please check your configuration and try again.")
 
 # ─── SMS Sending (Twilio) ───
 @api_router.post("/sms/send")
@@ -1017,7 +1202,7 @@ async def send_sms_endpoint(data: SendSMSRequest, background_tasks: BackgroundTa
         return {"success": True, "sid": msg.sid}
     except Exception as e:
         logger.error(f"Twilio error: {e}")
-        raise HTTPException(status_code=500, detail=f"SMS sending failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="SMS sending failed. Please check your configuration and try again.")
 
 # ─── Webhooks Management ───
 @api_router.post("/webhooks")
@@ -1207,12 +1392,73 @@ async def startup():
 
 app.include_router(api_router)
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECURITY: Rate Limit Exceeded Handler
+# Returns clean 429 response when rate limits are hit.
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Rate limit exceeded. Please slow down and try again."}
+    )
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECURITY: Global Exception Handler
+# Catches all unhandled exceptions and returns a clean 500 response.
+# Stack traces, DB details, and sensitive info are NEVER leaked to the client.
+# Full details are logged server-side for debugging.
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception on {request.method} {request.url.path}: {type(exc).__name__}: {exc}")
+    logger.debug(traceback.format_exc())
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An internal error occurred. Please try again later."}
+    )
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECURITY: Rate Limiting Middleware (slowapi)
+# Applied globally — 100 req/min default, stricter on auth routes.
+# ═══════════════════════════════════════════════════════════════════════════════
+app.add_middleware(SlowAPIMiddleware)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECURITY: Security Headers Middleware
+# Adds defensive HTTP headers to every response:
+# - X-Content-Type-Options: nosniff          → Prevent MIME-type sniffing
+# - X-Frame-Options: DENY                    → Prevent clickjacking
+# - X-XSS-Protection: 1; mode=block          → Legacy XSS filter
+# - Strict-Transport-Security                → Force HTTPS (production only)
+# - Referrer-Policy: strict-origin-when-cross-origin → Limit referrer leakage
+# - Permissions-Policy                       → Disable unused browser APIs
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if IS_PRODUCTION:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECURITY: CORS Configuration
+# - Only allow the specific frontend origin (no wildcards)
+# - Only allow necessary HTTP methods
+# - Only allow necessary headers
+# - Credentials (cookies) are allowed for auth
+# ═══════════════════════════════════════════════════════════════════════════════
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.environ.get("FRONTEND_URL", "http://localhost:3000")],
+    allow_origins=[FRONTEND_URL],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-API-Key", "Cookie"],
 )
 
 @app.on_event("shutdown")

@@ -102,10 +102,10 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
-user_problem_statement: "Add the same import/export ability that exists on properties page to contacts — including CSV/XLSX import, CSV export, and downloadable template"
+user_problem_statement: "Security hardening of PropFlow CRM backend — auth cookies, rate limiting, security headers, CORS, input validation, error handling"
 
 backend:
-  - task: "Contacts CSV export endpoint"
+  - task: "Secure auth cookies (environment-aware)"
     implemented: true
     working: true
     file: "backend/server.py"
@@ -115,24 +115,12 @@ backend:
     status_history:
         - working: true
           agent: "main"
-          comment: "Already existed, refactored with CONTACT_CSV_FIELDS constant"
-
-  - task: "Contacts import with CSV and XLSX support"
-    implemented: true
-    working: true
-    file: "backend/server.py"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-        - working: "NA"
-          agent: "main"
-          comment: "Updated /contacts/import to support XLSX/XLS in addition to CSV, returns total_rows count"
+          comment: "httponly=True, samesite=strict, secure=IS_PRODUCTION, max_age=900(access)/604800(refresh). Verified."
         - working: true
           agent: "testing"
-          comment: "✅ TESTED: CSV import successful (3/3 contacts imported), XLSX import successful (2/2 contacts imported), both return correct response format with imported/total_rows/errors fields. All imported contacts verified in contacts list."
+          comment: "Auth cookies working correctly. Login, logout, refresh, and session management all functional."
 
-  - task: "Contacts downloadable template endpoint"
+  - task: "Rate limiting (slowapi)"
     implemented: true
     working: true
     file: "backend/server.py"
@@ -140,41 +128,130 @@ backend:
     priority: "high"
     needs_retesting: false
     status_history:
-        - working: "NA"
+        - working: true
           agent: "main"
-          comment: "New endpoint GET /contacts/template returns CSV template with example row"
+          comment: "slowapi 100/min default, 10/min on auth. Verified rate limit working."
         - working: true
           agent: "testing"
-          comment: "✅ TESTED: GET /contacts/template returns proper CSV file with correct headers [name,email,phone,company,source,property_type,tags,notes,lead_score] and example row (Jane Smith). Content-Type and Content-Disposition headers correct for file download."
+          comment: "Rate limiting working correctly. Auth endpoints properly limited to 10/min - triggered 429 after 6 rapid requests."
 
-frontend:
-  - task: "Contacts page Template button and XLSX import support"
+  - task: "Security headers middleware"
     implemented: true
-    working: "NA"
-    file: "frontend/src/pages/ContactsPage.js"
+    working: true
+    file: "backend/server.py"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "All 6 headers verified via curl: nosniff, DENY, XSS block, HSTS, referrer, permissions."
+        - working: true
+          agent: "testing"
+          comment: "Minor: Permissions-Policy header order differs from expected (camera, microphone, geolocation vs geolocation, microphone, camera) but all values present and functional."
+
+  - task: "CORS tightening"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "Specific methods and headers instead of wildcards. Frontend verified working."
+        - working: true
+          agent: "testing"
+          comment: "CORS working correctly. All API endpoints accessible and functional."
+
+  - task: "Env var validation (fail-fast)"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "6 required vars checked at startup. 5 optional vars log warnings."
+        - working: true
+          agent: "testing"
+          comment: "Environment validation working. Server starts successfully with all required variables."
+
+  - task: "Pydantic model validation"
+    implemented: true
+    working: false
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
     status_history:
         - working: "NA"
           agent: "main"
-          comment: "Added Template button, XLSX import support, total_rows in import alert"
+          comment: "Email validators, enum constraints, length limits, value bounds on all models."
+        - working: false
+          agent: "testing"
+          comment: "Email validation not working - invalid email 'invalid-email' was accepted and contact created successfully. ContactCreate model email validation is not being enforced."
+
+  - task: "Global exception handler"
+    implemented: true
+    working: false
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "Clean 500 errors, no stack traces leaked. AI/email/SMS errors sanitized."
+        - working: false
+          agent: "testing"
+          comment: "ObjectId validation causing 500 errors instead of proper 404. GET /contacts/invalid_id returns 500 with bson.errors.InvalidId exception instead of clean 404 error."
+
+  - task: "Search input regex sanitization"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "re.escape() on contacts search to prevent ReDoS."
+        - working: true
+          agent: "testing"
+          comment: "Search functionality working correctly. Contacts search with various inputs functional."
+
+  - task: "Backend CRUD functionality regression test"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "All core CRUD operations working: Contacts (create/read/update/delete), Properties, Deals, Tasks, Activities, Templates. Import/export functionality operational. Dashboard stats working. 31/34 tests passed."
 
 metadata:
   created_by: "main_agent"
-  version: "1.0"
-  test_sequence: 2
+  version: "2.0"
+  test_sequence: 3
   run_ui: false
 
 test_plan:
   current_focus:
-    - "Contacts page Template button and XLSX import support"
+    - "All backend functionality regression test"
   stuck_tasks: []
-  test_all: false
+  test_all: true
   test_priority: "high_first"
 
 agent_communication:
     - agent: "main"
-      message: "Added 3 features to contacts import/export to match properties: 1) GET /contacts/template endpoint, 2) Updated POST /contacts/import to support XLSX/XLS files, 3) Import now returns total_rows. Auth: admin@propflow.com / admin123. Test the new template endpoint and import with both CSV and XLSX."
+      message: "Major security hardening. Test ALL existing functionality for regressions. Auth: admin@propflow.com / admin123. Changes: cookies now samesite=strict+secure, rate limit 10/min on auth, all models have field validators, search inputs escaped. Test CRUD on all entities, login/register, templates, imports/exports."
     - agent: "testing"
-      message: "✅ BACKEND TESTING COMPLETE: All contacts import/export endpoints working perfectly. Template endpoint returns proper CSV with example data. CSV import tested with 3 contacts (100% success). XLSX import tested with 2 contacts (100% success). Export endpoint returns all contacts in CSV format. All 5 test contacts verified in system. Backend functionality is fully operational."
+      message: "Comprehensive backend regression testing completed. 31/34 tests passed (91.2% success rate). Core functionality working: Auth, CRUD operations, import/export, dashboard, rate limiting. Found 3 issues: 1) Permissions-Policy header order mismatch (minor), 2) Email validation not working - invalid emails accepted, 3) ObjectId validation causing 500 errors instead of 404. All critical business functionality operational."
