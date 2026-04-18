@@ -1,5 +1,7 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import api from '../lib/api';
+import { useQueryClient } from '@tanstack/react-query';
+import { useTasks, useContacts, useDeals, useUpdateTask, useDeleteTask } from '../hooks/useApi';
 import { Plus, CheckCircle2, Circle, Clock, AlertTriangle, Trash2, Calendar } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -17,42 +19,25 @@ const PRIORITY_STYLES = {
 };
 
 export default function TasksPage() {
-  const [tasks, setTasks] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [filter, setFilter] = useState('all');
-  const [contacts, setContacts] = useState([]);
-  const [deals, setDeals] = useState([]);
+  const queryClient = useQueryClient();
 
-  const fetchTasks = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params = {};
-      if (filter === 'active') params.completed = 'false';
-      if (filter === 'completed') params.completed = 'true';
-      const [tasksRes, contactsRes, dealsRes] = await Promise.all([
-        api.get('/tasks', { params: { ...params, limit: 500 } }),
-        api.get('/contacts', { params: { limit: 500 } }),
-        api.get('/deals', { params: { limit: 500 } }),
-      ]);
-      setTasks(tasksRes.data.data || tasksRes.data);
-      setContacts(contactsRes.data.data || contactsRes.data);
-      setDeals(dealsRes.data.data || dealsRes.data);
-    } catch (err) { console.error(err); }
-    setLoading(false);
-  }, [filter]);
+  const { data: tasks = [], isLoading: loading, error } = useTasks(filter === 'all' ? '' : filter);
+  const { data: contacts = [] } = useContacts();
+  const { data: deals = [] } = useDeals();
+  const updateTask = useUpdateTask();
+  const deleteTask = useDeleteTask();
 
-  useEffect(() => { fetchTasks(); }, [fetchTasks]);
-
-  const toggleComplete = async (task) => {
-    await api.put(`/tasks/${task.id}`, { completed: !task.completed });
-    fetchTasks();
+  const toggleComplete = (task) => {
+    updateTask.mutate({ id: task.id, data: { completed: !task.completed } });
   };
 
-  const handleDelete = async (id) => {
-    await api.delete(`/tasks/${id}`);
-    fetchTasks();
+  const handleDelete = (id) => {
+    deleteTask.mutate(id);
   };
+
+  const invalidateTasks = () => queryClient.invalidateQueries({ queryKey: ['tasks'] });
 
   const getContactName = (id) => contacts.find(c => c.id === id)?.name || '';
   const getDealTitle = (id) => deals.find(d => d.id === id)?.title || '';
@@ -65,6 +50,8 @@ export default function TasksPage() {
   const today = new Date().toISOString().split('T')[0];
   const todayTasks = tasks.filter(t => t.due_date?.startsWith(today) && !t.completed);
   const overdueTasks = tasks.filter(t => isOverdue(t));
+
+  if (error) return <div className="p-4 sm:p-6 lg:p-8"><div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">Failed to load tasks. Please try again.</div></div>;
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-[1600px] mx-auto space-y-5" data-testid="tasks-page">
@@ -81,7 +68,7 @@ export default function TasksPage() {
           </DialogTrigger>
           <DialogContent className="sm:max-w-md" data-testid="add-task-dialog">
             <DialogHeader><DialogTitle>New Task</DialogTitle></DialogHeader>
-            <TaskForm contacts={contacts} deals={deals} onSubmit={async (d) => { await api.post('/tasks', d); setShowAdd(false); fetchTasks(); }} />
+            <TaskForm contacts={contacts} deals={deals} onSubmit={async (d) => { await api.post('/tasks', d); setShowAdd(false); invalidateTasks(); }} />
           </DialogContent>
         </Dialog>
       </div>

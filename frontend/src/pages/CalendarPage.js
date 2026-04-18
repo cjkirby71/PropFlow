@@ -1,5 +1,7 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import api from '../lib/api';
+import { useQueryClient } from '@tanstack/react-query';
+import { useTasks } from '../hooks/useApi';
 import { ChevronLeft, ChevronRight, CheckCircle2, Circle, Clock, AlertTriangle } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
@@ -14,21 +16,11 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 export default function CalendarPage() {
-  const [tasks, setTasks] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [currentDate, setCurrentDate] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState(null);
 
-  const fetchTasks = useCallback(async () => {
-    setLoading(true);
-    try {
-      const { data } = await api.get('/tasks', { params: { limit: 500 } });
-      setTasks(data.data || data);
-    } catch (err) { console.error(err); }
-    setLoading(false);
-  }, []);
-
-  useEffect(() => { fetchTasks(); }, [fetchTasks]);
+  const { data: tasks = [], isLoading: loading, error } = useTasks();
+  const queryClient = useQueryClient();
 
   const year = currentDate.getFullYear();
   const month = currentDate.getMonth();
@@ -48,12 +40,14 @@ export default function CalendarPage() {
 
   const toggleComplete = async (task) => {
     await api.put(`/tasks/${task.id}`, { completed: !task.completed });
-    fetchTasks();
+    queryClient.invalidateQueries({ queryKey: ['tasks'] });
   };
 
   const cells = [];
   for (let i = 0; i < firstDay; i++) cells.push(null);
   for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  if (error) return <div className="p-4 sm:p-6 lg:p-8"><div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">Failed to load calendar. Please try again.</div></div>;
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-[1600px] mx-auto space-y-5" data-testid="calendar-page">

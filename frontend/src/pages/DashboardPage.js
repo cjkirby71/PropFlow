@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import api from '../lib/api';
+import { useDashboardStats } from '../hooks/useApi';
 import { Users, Kanban, Building2, CheckSquare, TrendingUp, ArrowRight } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
@@ -14,15 +14,12 @@ const PIPELINE_LABELS = {
 const COLORS = ['#E0E7FF', '#FEF08A', '#D9F99D', '#FED7AA', '#BBF7D0', '#C7D2FE', '#FDE68A'];
 
 export default function DashboardPage() {
-  const [stats, setStats] = useState(null);
-  const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
-
-  useEffect(() => {
-    api.get('/dashboard/stats').then(r => { setStats(r.data); setLoading(false); }).catch(() => setLoading(false));
-  }, []);
+  const { data: stats, isLoading: loading, error } = useDashboardStats();
 
   if (loading) return <div className="p-6 sm:p-8" data-testid="dashboard-loading"><div className="animate-pulse space-y-4"><div className="h-8 bg-slate-200 rounded w-48" /><div className="grid grid-cols-2 md:grid-cols-4 gap-4">{[1,2,3,4].map(i => <div key={i} className="h-28 bg-slate-200 rounded-lg" />)}</div></div></div>;
+
+  if (error) return <div className="p-6 sm:p-8"><div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">Failed to load dashboard. Please try again.</div></div>;
 
   const statCards = [
     { label: 'Total Contacts', value: stats?.total_contacts || 0, icon: Users, color: 'bg-blue-50 text-blue-700', path: '/contacts' },

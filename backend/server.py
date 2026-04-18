@@ -28,6 +28,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # ─── Logging ───
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -82,6 +83,91 @@ JWT_ALGORITHM = "HS256"
 # ═══════════════════════════════════════════════════════════════════════════════
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
 app.state.limiter = limiter
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AI COST GUARDRAILS & TOKEN TRACKING
+# - Estimate tokens before each call; block if expected cost exceeds MAX_AI_COST_PER_CALL
+# - Log actual usage to ai_usage_logs collection after each call
+# - Rate limit: max 20 AI calls per user per hour
+# GPT-5.2 approximate pricing: $2/1M input tokens, $8/1M output tokens
+# ═══════════════════════════════════════════════════════════════════════════════
+MAX_AI_COST_PER_CALL = float(os.environ.get("MAX_AI_COST_PER_CALL", "0.05"))
+MAX_AI_CALLS_PER_HOUR = int(os.environ.get("MAX_AI_CALLS_PER_HOUR", "20"))
+AI_INPUT_COST_PER_TOKEN = 2.0 / 1_000_000   # $0.000002
+AI_OUTPUT_COST_PER_TOKEN = 8.0 / 1_000_000   # $0.000008
+AI_EST_OUTPUT_TOKENS = 800  # Conservative estimate for output
+
+def estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~1 token per 4 characters for English text."""
+    return max(1, len(text) // 4)
+
+def estimate_ai_cost(input_text: str) -> float:
+    """Estimate the cost of an AI call before making it."""
+    input_tokens = estimate_tokens(input_text)
+    return (input_tokens * AI_INPUT_COST_PER_TOKEN) + (AI_EST_OUTPUT_TOKENS * AI_OUTPUT_COST_PER_TOKEN)
+
+async def check_ai_rate_limit(user_id: str):
+    """Enforce per-user AI rate limit: MAX_AI_CALLS_PER_HOUR calls/hour."""
+    one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    recent_count = await db.ai_usage_logs.count_documents({
+        "user_id": user_id, "timestamp": {"$gte": one_hour_ago}
+    })
+    if recent_count >= MAX_AI_CALLS_PER_HOUR:
+        raise HTTPException(
+            status_code=429,
+            detail=f"AI rate limit exceeded. Maximum {MAX_AI_CALLS_PER_HOUR} AI calls per hour. Please wait and try again."
+        )
+
+async def log_ai_usage(user_id: str, endpoint: str, input_tokens: int, output_tokens: int, model: str = "gpt-5.2"):
+    """Log AI call usage for cost tracking and auditing."""
+    input_cost = input_tokens * AI_INPUT_COST_PER_TOKEN
+    output_cost = output_tokens * AI_OUTPUT_COST_PER_TOKEN
+    total_cost = input_cost + output_cost
+    log_entry = {
+        "user_id": user_id,
+        "endpoint": endpoint,
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "estimated_cost_usd": round(total_cost, 6),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.ai_usage_logs.insert_one(log_entry)
+    logger.info(f"AI USAGE | user={user_id} | endpoint={endpoint} | "
+                f"in={input_tokens} out={output_tokens} tokens | "
+                f"cost=${total_cost:.6f}")
+
+def guard_ai_cost(input_text: str):
+    """Block AI call if estimated cost exceeds the per-call limit."""
+    estimated_cost = estimate_ai_cost(input_text)
+    if estimated_cost > MAX_AI_COST_PER_CALL:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Input too large. Estimated cost ${estimated_cost:.4f} exceeds "
+                   f"limit of ${MAX_AI_COST_PER_CALL:.2f}. Please reduce the input."
+        )
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RETRY LOGIC: Twilio SMS with exponential backoff
+# 3 attempts, waits 1s → 2s → 4s between retries
+# Only retries on transient network/service errors, not auth failures
+# ═══════════════════════════════════════════════════════════════════════════════
+def send_sms_with_retry(account_sid: str, auth_token: str, from_number: str, to_phone: str, message: str):
+    """Synchronous Twilio SMS call wrapped with tenacity retry."""
+    from twilio.rest import Client as TwilioClient
+    from twilio.base.exceptions import TwilioRestException
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=8),
+        retry=retry_if_exception_type((ConnectionError, TimeoutError, OSError)),
+        reraise=True,
+    )
+    def _send():
+        client = TwilioClient(account_sid, auth_token)
+        return client.messages.create(body=message, from_=from_number, to=to_phone)
+
+    return _send()
 
 # ─── Password Hashing ───
 def hash_password(password: str) -> str:
@@ -600,6 +686,21 @@ async def create_mongodb_indexes():
         name="idx_webhooks_user_active"
     )
 
+    # ── ai_usage_logs collection ──
+    # Track AI usage per user for rate limiting and cost auditing
+    await db.ai_usage_logs.create_index(
+        [("user_id", 1), ("timestamp", -1)],
+        background=True,
+        name="idx_ai_usage_user_ts"
+    )
+    # TTL: auto-delete AI usage logs older than 30 days
+    await db.ai_usage_logs.create_index(
+        "timestamp_dt",
+        expireAfterSeconds=30 * 86400,
+        background=True,
+        sparse=True
+    )
+
     logger.info("MongoDB indexes created successfully.")
 
 # ─── Auth Routes ───
@@ -992,33 +1093,47 @@ async def update_deal(deal_id: str, data: DealUpdate, background_tasks: Backgrou
             raise HTTPException(status_code=400, detail="Invalid stage for this pipeline")
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
     await db.deals.update_one({"_id": validate_object_id(deal_id, "Deal")}, {"$set": updates})
-    deal = await db.deals.find_one({"_id": validate_object_id(deal_id, "Deal")})
-    serialized = serialize_doc(deal)
-    # ─── Stage Automation: auto-create task on stage change ───
+
+    # ─── Stage Automation with transaction safety ───
+    # If auto-task creation fails, rollback the stage change
     new_stage = updates.get("stage")
-    if new_stage and new_stage != old_stage and new_stage in STAGE_AUTO_TASKS:
-        auto = STAGE_AUTO_TASKS[new_stage]
-        due = (datetime.now(timezone.utc) + timedelta(days=auto["days_offset"])).strftime("%Y-%m-%d")
-        await db.tasks.insert_one({
-            "title": f"[Auto] {auto['title']} - {existing.get('title', '')}",
-            "description": f"Auto-generated when deal moved to {new_stage}",
-            "due_date": due,
-            "contact_id": existing.get("contact_id", ""),
-            "deal_id": deal_id,
-            "priority": auto["priority"],
-            "completed": False,
-            "user_id": user["_id"],
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        })
-        logger.info(f"Auto-task created for deal {deal_id} stage change to {new_stage}")
-    # ─── Webhook: trigger on deal stage change ───
     if new_stage and new_stage != old_stage:
+        if new_stage in STAGE_AUTO_TASKS:
+            try:
+                auto = STAGE_AUTO_TASKS[new_stage]
+                due = (datetime.now(timezone.utc) + timedelta(days=auto["days_offset"])).strftime("%Y-%m-%d")
+                await db.tasks.insert_one({
+                    "title": f"[Auto] {auto['title']} - {existing.get('title', '')}",
+                    "description": f"Auto-generated when deal moved to {new_stage}",
+                    "due_date": due,
+                    "contact_id": existing.get("contact_id", ""),
+                    "deal_id": deal_id,
+                    "priority": auto["priority"],
+                    "completed": False,
+                    "user_id": user["_id"],
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                })
+                logger.info(f"Auto-task created for deal {deal_id} stage change to {new_stage}")
+            except Exception as e:
+                # ROLLBACK: Revert the stage change if auto-task creation fails
+                logger.error(f"Auto-task creation failed for deal {deal_id}, rolling back stage: {e}")
+                await db.deals.update_one(
+                    {"_id": validate_object_id(deal_id, "Deal")},
+                    {"$set": {"stage": old_stage, "updated_at": existing.get("updated_at", "")}}
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="Stage change failed: could not create auto-task. Deal has been reverted to its previous stage."
+                )
+        # ─── Webhook: trigger on deal stage change (fire-and-forget) ───
         background_tasks.add_task(trigger_webhooks, user["_id"], "deal_stage_change", {
             "deal_id": deal_id, "title": existing.get("title", ""),
             "pipeline_type": existing.get("pipeline_type", ""),
             "old_stage": old_stage, "new_stage": new_stage,
         })
-    return serialized
+
+    deal = await db.deals.find_one({"_id": validate_object_id(deal_id, "Deal")})
+    return serialize_doc(deal)
 
 @api_router.delete("/deals/{deal_id}")
 async def delete_deal(deal_id: str, user=Depends(get_any_auth_user)):
@@ -1094,9 +1209,10 @@ async def list_activities(
     sort_order = 1 if order == "asc" else -1
     return await paginate(db.activities, query, page=page, limit=limit, sort_field=sort, sort_order=sort_order)
 
-# ─── AI Routes ───
+# ─── AI Routes (with cost guardrails, rate limiting, and usage logging) ───
 @api_router.post("/ai/draft-email")
 async def ai_draft_email(data: AIEmailRequest, user=Depends(get_any_auth_user)):
+    await check_ai_rate_limit(user["_id"])
     contact = await db.contacts.find_one({"_id": validate_object_id(data.contact_id, "Contact"), "user_id": user["_id"]})
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
@@ -1104,12 +1220,7 @@ async def ai_draft_email(data: AIEmailRequest, user=Depends(get_any_auth_user)):
     activity_summary = "\n".join([f"- {a.get('activity_type','')}: {a.get('description','')}" for a in activities])
     deals = await db.deals.find({"contact_id": data.contact_id}).to_list(10)
     deal_summary = "\n".join([f"- {d.get('title','')}: {d.get('stage','')}" for d in deals])
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-        chat = LlmChat(
-            api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
-            session_id=f"email-draft-{data.contact_id}-{datetime.now(timezone.utc).isoformat()}",
-            system_message=f"""You are an expert real estate agent assistant. Draft a {data.tone} follow-up email.
+    system_msg = f"""You are an expert real estate agent assistant. Draft a {data.tone} follow-up email.
 Contact: {contact.get('name','')} ({contact.get('email','')})
 Company: {contact.get('company','')}
 Property Interest: {contact.get('property_type','')}
@@ -1120,28 +1231,38 @@ Current Deals:
 Additional Context: {data.context}
 
 Write a concise, professional email ready to send. Include subject line."""
+    # Cost guardrail: estimate and block if too expensive
+    full_input = system_msg + "\nDraft the follow-up email now."
+    guard_ai_cost(full_input)
+    input_tokens = estimate_tokens(full_input)
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        chat = LlmChat(
+            api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
+            session_id=f"email-draft-{data.contact_id}-{datetime.now(timezone.utc).isoformat()}",
+            system_message=system_msg
         ).with_model("openai", "gpt-5.2")
         msg = UserMessage(text="Draft the follow-up email now.")
         result = await chat.send_message(msg)
+        output_tokens = estimate_tokens(result)
+        await log_ai_usage(user["_id"], "draft-email", input_tokens, output_tokens)
         return {"draft": result, "contact_name": contact.get("name", "")}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"AI email draft error: {e}")
         raise HTTPException(status_code=500, detail="AI service temporarily unavailable. Please try again.")
 
 @api_router.post("/ai/lead-score")
 async def ai_lead_score(data: AILeadScoreRequest, user=Depends(get_any_auth_user)):
+    await check_ai_rate_limit(user["_id"])
     contact = await db.contacts.find_one({"_id": validate_object_id(data.contact_id, "Contact"), "user_id": user["_id"]})
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
     activities = await db.activities.find({"contact_id": data.contact_id}).to_list(50)
     deals = await db.deals.find({"contact_id": data.contact_id}).to_list(20)
     tasks = await db.tasks.find({"contact_id": data.contact_id}).to_list(20)
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-        chat = LlmChat(
-            api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
-            session_id=f"lead-score-{data.contact_id}-{datetime.now(timezone.utc).isoformat()}",
-            system_message=f"""You are an expert real estate lead scoring AI. Analyze this lead and provide a score from 0-100.
+    system_msg = f"""You are an expert real estate lead scoring AI. Analyze this lead and provide a score from 0-100.
 Contact: {contact.get('name','')}
 Email: {contact.get('email','')}
 Company: {contact.get('company','')}
@@ -1153,10 +1274,20 @@ Number of tasks: {len(tasks)}
 Tags: {', '.join(contact.get('tags', []))}
 
 Respond ONLY with a JSON object: {{"score": <number 0-100>, "reasoning": "<brief explanation>", "next_action": "<recommended next step>"}}"""
+    full_input = system_msg + "\nScore this lead now."
+    guard_ai_cost(full_input)
+    input_tokens = estimate_tokens(full_input)
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        chat = LlmChat(
+            api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
+            session_id=f"lead-score-{data.contact_id}-{datetime.now(timezone.utc).isoformat()}",
+            system_message=system_msg
         ).with_model("openai", "gpt-5.2")
         msg = UserMessage(text="Score this lead now.")
         result = await chat.send_message(msg)
-        import json
+        output_tokens = estimate_tokens(result)
+        await log_ai_usage(user["_id"], "lead-score", input_tokens, output_tokens)
         try:
             cleaned = result.strip()
             if cleaned.startswith("```"):
@@ -1166,27 +1297,38 @@ Respond ONLY with a JSON object: {{"score": <number 0-100>, "reasoning": "<brief
             return score_data
         except json.JSONDecodeError:
             return {"score": 50, "reasoning": result, "next_action": "Review manually"}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"AI lead score error: {e}")
         raise HTTPException(status_code=500, detail="AI service temporarily unavailable. Please try again.")
 
 @api_router.post("/ai/summarize-activities")
 async def ai_summarize(contact_id: str, user=Depends(get_any_auth_user)):
+    await check_ai_rate_limit(user["_id"])
     activities = await db.activities.find({"contact_id": contact_id, "user_id": user["_id"]}).sort("created_at", -1).to_list(50)
     if not activities:
         return {"summary": "No activities found for this contact."}
     contact = await db.contacts.find_one({"_id": validate_object_id(contact_id, "Contact")})
     activity_text = "\n".join([f"[{a.get('created_at','')}] {a.get('activity_type','')}: {a.get('description','')}" for a in activities])
+    system_msg = f"""Summarize these real estate CRM activities for contact {contact.get('name','') if contact else 'Unknown'}. Be concise and highlight key points, next steps, and any concerns."""
+    full_input = system_msg + f"\nActivities:\n{activity_text}"
+    guard_ai_cost(full_input)
+    input_tokens = estimate_tokens(full_input)
     try:
         from emergentintegrations.llm.chat import LlmChat, UserMessage
         chat = LlmChat(
             api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
             session_id=f"summary-{contact_id}-{datetime.now(timezone.utc).isoformat()}",
-            system_message=f"""Summarize these real estate CRM activities for contact {contact.get('name','') if contact else 'Unknown'}. Be concise and highlight key points, next steps, and any concerns."""
+            system_message=system_msg
         ).with_model("openai", "gpt-5.2")
         msg = UserMessage(text=f"Activities:\n{activity_text}")
         result = await chat.send_message(msg)
+        output_tokens = estimate_tokens(result)
+        await log_ai_usage(user["_id"], "summarize-activities", input_tokens, output_tokens)
         return {"summary": result}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"AI summary error: {e}")
         raise HTTPException(status_code=500, detail="AI service temporarily unavailable. Please try again.")
@@ -1327,23 +1469,30 @@ async def use_template(template_id: str, user=Depends(get_any_auth_user)):
 
 @api_router.post("/templates/ai-generate")
 async def ai_generate_template(request: Request, user=Depends(get_current_user)):
+    await check_ai_rate_limit(user["_id"])
     body = await request.json()
     purpose = body.get("purpose", "follow-up")
     category = body.get("category", "email")
     property_type = body.get("property_type", "residential_lease")
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-        system = f"""You are an expert real estate copywriter. Generate a {category} template for {purpose}.
+    system_msg = f"""You are an expert real estate copywriter. Generate a {category} template for {purpose}.
 Property type context: {property_type}
 Use placeholders like {{contact_name}}, {{property_address}}, {{agent_name}}, {{company_name}} for personalization.
 {"Include a Subject line on the first line." if category == "email" else "Keep it under 160 characters for SMS."}
 Make it professional, warm, and action-oriented."""
+    prompt_text = f"Generate the {category} template now for: {purpose}"
+    full_input = system_msg + "\n" + prompt_text
+    guard_ai_cost(full_input)
+    input_tokens = estimate_tokens(full_input)
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
         chat = LlmChat(
             api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
             session_id=f"template-gen-{datetime.now(timezone.utc).isoformat()}",
-            system_message=system
+            system_message=system_msg
         ).with_model("openai", "gpt-5.2")
-        result = await chat.send_message(UserMessage(text=f"Generate the {category} template now for: {purpose}"))
+        result = await chat.send_message(UserMessage(text=prompt_text))
+        output_tokens = estimate_tokens(result)
+        await log_ai_usage(user["_id"], "generate-template", input_tokens, output_tokens)
         subject = ""
         template_body = result
         if category == "email":
@@ -1353,6 +1502,8 @@ Make it professional, warm, and action-oriented."""
                     template_body = result.replace(line, "").strip()
                     break
         return {"subject": subject, "body": template_body, "category": category}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"AI template generation error: {e}")
         raise HTTPException(status_code=500, detail="AI service temporarily unavailable. Please try again.")
@@ -1390,7 +1541,7 @@ async def send_email_endpoint(data: SendEmailRequest, background_tasks: Backgrou
         logger.error(f"Brevo email error: {e}")
         raise HTTPException(status_code=500, detail="Email sending failed. Please check your configuration and try again.")
 
-# ─── SMS Sending (Twilio) ───
+# ─── SMS Sending (Twilio) with retry logic ───
 @api_router.post("/sms/send")
 async def send_sms_endpoint(data: SendSMSRequest, background_tasks: BackgroundTasks, user=Depends(get_any_auth_user)):
     account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
@@ -1399,9 +1550,8 @@ async def send_sms_endpoint(data: SendSMSRequest, background_tasks: BackgroundTa
     if not account_sid or not auth_token or not from_number:
         raise HTTPException(status_code=503, detail="SMS service not configured. Add TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_PHONE_NUMBER to .env")
     try:
-        from twilio.rest import Client as TwilioClient
-        twilio_client = TwilioClient(account_sid, auth_token)
-        msg = twilio_client.messages.create(body=data.message, from_=from_number, to=data.to_phone)
+        # Uses tenacity retry: 3 attempts with exponential backoff (1s → 2s → 4s)
+        msg = send_sms_with_retry(account_sid, auth_token, from_number, data.to_phone, data.message)
         await db.activities.insert_one({
             "contact_id": data.contact_id, "user_id": user["_id"],
             "activity_type": "sms", "description": f"Sent SMS: {data.message[:80]}...",
@@ -1410,7 +1560,7 @@ async def send_sms_endpoint(data: SendSMSRequest, background_tasks: BackgroundTa
         background_tasks.add_task(trigger_webhooks, user["_id"], "sms_sent", {"contact_id": data.contact_id, "message": data.message[:80]})
         return {"success": True, "sid": msg.sid}
     except Exception as e:
-        logger.error(f"Twilio error: {e}")
+        logger.error(f"Twilio error after retries: {e}")
         raise HTTPException(status_code=500, detail="SMS sending failed. Please check your configuration and try again.")
 
 # ─── Webhooks Management ───

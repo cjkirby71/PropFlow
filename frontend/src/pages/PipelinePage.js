@@ -1,6 +1,8 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import api from '../lib/api';
+import { useDeals, usePipelineStages, useContacts, useProperties, useUpdateDeal, useDeleteDeal } from '../hooks/useApi';
+import { useQueryClient } from '@tanstack/react-query';
 import { Plus, DollarSign, User, Building2, MoreHorizontal, Trash2, Edit } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs';
@@ -34,58 +36,42 @@ const STAGE_COLORS = {
 
 export default function PipelinePage() {
   const [pipeline, setPipeline] = useState('residential_lease');
-  const [stages, setStages] = useState({});
-  const [deals, setDeals] = useState([]);
-  const [contacts, setContacts] = useState([]);
-  const [properties, setProperties] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [editDeal, setEditDeal] = useState(null);
+  const queryClient = useQueryClient();
 
-  const fetchData = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [stagesRes, dealsRes, contactsRes, propsRes] = await Promise.all([
-        api.get('/pipelines/stages'),
-        api.get('/deals', { params: { pipeline_type: pipeline, limit: 500 } }),
-        api.get('/contacts', { params: { limit: 500 } }),
-        api.get('/properties', { params: { limit: 500 } }),
-      ]);
-      setStages(stagesRes.data);
-      setDeals(dealsRes.data.data || dealsRes.data);
-      setContacts(contactsRes.data.data || contactsRes.data);
-      setProperties(propsRes.data.data || propsRes.data);
-    } catch (err) { console.error(err); }
-    setLoading(false);
-  }, [pipeline]);
+  const { data: stages = {}, isLoading: stagesLoading } = usePipelineStages();
+  const { data: deals = [], isLoading: dealsLoading, error } = useDeals(pipeline);
+  const { data: contacts = [] } = useContacts();
+  const { data: properties = [] } = useProperties();
+  const updateDeal = useUpdateDeal();
+  const deleteDeal = useDeleteDeal();
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  const loading = stagesLoading || dealsLoading;
 
   const currentStages = stages[pipeline] || [];
   const dealsByStage = {};
   currentStages.forEach(s => { dealsByStage[s] = deals.filter(d => d.stage === s); });
 
-  const handleDragEnd = async (result) => {
+  // Optimistic drag-and-drop: TanStack Query handles cache update + rollback via useUpdateDeal
+  const handleDragEnd = (result) => {
     if (!result.destination) return;
     const { draggableId, destination } = result;
     const newStage = destination.droppableId;
-    // Optimistic update
-    setDeals(prev => prev.map(d => d.id === draggableId ? { ...d, stage: newStage } : d));
-    try {
-      await api.put(`/deals/${draggableId}`, { stage: newStage });
-    } catch {
-      fetchData(); // Revert on error
-    }
+    updateDeal.mutate({ id: draggableId, data: { stage: newStage } });
   };
 
-  const handleDelete = async (id) => {
+  const handleDelete = (id) => {
     if (!window.confirm('Delete this deal?')) return;
-    await api.delete(`/deals/${id}`);
-    fetchData();
+    deleteDeal.mutate(id);
   };
+
+  const invalidateDeals = () => queryClient.invalidateQueries({ queryKey: ['deals'] });
 
   const getContactName = (contactId) => contacts.find(c => c.id === contactId)?.name || '';
   const getPropertyName = (propertyId) => properties.find(p => p.id === propertyId)?.name || '';
+
+  if (error) return <div className="p-4 sm:p-6 lg:p-8"><div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">Failed to load pipeline. Please try again.</div></div>;
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-[1600px] mx-auto space-y-5" data-testid="pipeline-page">
@@ -102,7 +88,7 @@ export default function PipelinePage() {
           </DialogTrigger>
           <DialogContent className="sm:max-w-md" data-testid="add-deal-dialog">
             <DialogHeader><DialogTitle>New Deal</DialogTitle></DialogHeader>
-            <DealForm pipeline={pipeline} stages={currentStages} contacts={contacts} properties={properties} onSubmit={async (d) => { await api.post('/deals', d); setShowAdd(false); fetchData(); }} />
+            <DealForm pipeline={pipeline} stages={currentStages} contacts={contacts} properties={properties} onSubmit={async (d) => { await api.post('/deals', d); setShowAdd(false); invalidateDeals(); }} />
           </DialogContent>
         </Dialog>
       </div>
@@ -190,7 +176,7 @@ export default function PipelinePage() {
       <Dialog open={!!editDeal} onOpenChange={(o) => { if (!o) setEditDeal(null); }}>
         <DialogContent className="sm:max-w-md" data-testid="edit-deal-dialog">
           <DialogHeader><DialogTitle>Edit Deal</DialogTitle></DialogHeader>
-          {editDeal && <DealForm initial={editDeal} pipeline={pipeline} stages={currentStages} contacts={contacts} properties={properties} onSubmit={async (d) => { await api.put(`/deals/${editDeal.id}`, d); setEditDeal(null); fetchData(); }} />}
+          {editDeal && <DealForm initial={editDeal} pipeline={pipeline} stages={currentStages} contacts={contacts} properties={properties} onSubmit={async (d) => { await api.put(`/deals/${editDeal.id}`, d); setEditDeal(null); invalidateDeals(); }} />}
         </DialogContent>
       </Dialog>
     </div>

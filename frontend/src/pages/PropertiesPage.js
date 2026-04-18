@@ -1,5 +1,7 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import api from '../lib/api';
+import { useProperties, useDeleteProperty, useImportProperties } from '../hooks/useApi';
 import { Plus, Building2, MapPin, DollarSign, MoreHorizontal, Trash2, Edit, Search, Download, Upload, FileSpreadsheet } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -11,31 +13,20 @@ import { Badge } from '../components/ui/badge';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '../components/ui/dropdown-menu';
 
 export default function PropertiesPage() {
-  const [properties, setProperties] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [editProp, setEditProp] = useState(null);
   const [filterPropType, setFilterPropType] = useState('');
   const [filterListType, setFilterListType] = useState('');
+  const queryClient = useQueryClient();
 
-  const fetchProps = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params = {};
-      if (filterPropType) params.property_type = filterPropType;
-      if (filterListType) params.listing_type = filterListType;
-      const { data } = await api.get('/properties', { params });
-      setProperties(data.data || data);
-    } catch (err) { console.error(err); }
-    setLoading(false);
-  }, [filterPropType, filterListType]);
-
-  useEffect(() => { fetchProps(); }, [fetchProps]);
+  const { data: properties = [], isLoading: loading, error } = useProperties(filterPropType, filterListType);
+  const deleteMutation = useDeleteProperty();
+  const importMutation = useImportProperties();
+  const invalidateProps = () => queryClient.invalidateQueries({ queryKey: ['properties'] });
 
   const handleDelete = async (id) => {
     if (!window.confirm('Delete this property?')) return;
-    await api.delete(`/properties/${id}`);
-    fetchProps();
+    deleteMutation.mutate(id);
   };
 
   const handleExport = async () => {
@@ -67,13 +58,16 @@ export default function PropertiesPage() {
     if (!file) return;
     const formData = new FormData();
     formData.append('file', file);
-    try {
-      const { data } = await api.post('/properties/import', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
-      alert(`Imported ${data.imported} of ${data.total_rows} properties.${data.errors?.length ? `\n\nErrors:\n${data.errors.join('\n')}` : ''}`);
-      fetchProps();
-    } catch (err) { alert('Import failed: ' + (err.response?.data?.detail || err.message)); }
+    importMutation.mutate(formData, {
+      onSuccess: ({ data }) => {
+        alert(`Imported ${data.imported} of ${data.total_rows} properties.${data.errors?.length ? `\n\nErrors:\n${data.errors.join('\n')}` : ''}`);
+      },
+      onError: (err) => { alert('Import failed: ' + (err.response?.data?.detail || err.message)); },
+    });
     e.target.value = '';
   };
+
+  if (error) return <div className="p-4 sm:p-6 lg:p-8"><div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">Failed to load properties. Please try again.</div></div>;
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-[1600px] mx-auto space-y-5" data-testid="properties-page">
@@ -103,7 +97,7 @@ export default function PropertiesPage() {
             </DialogTrigger>
           <DialogContent className="sm:max-w-lg" data-testid="add-property-dialog">
             <DialogHeader><DialogTitle>Add Property</DialogTitle></DialogHeader>
-            <PropertyForm onSubmit={async (d) => { await api.post('/properties', d); setShowAdd(false); fetchProps(); }} />
+            <PropertyForm onSubmit={async (d) => { await api.post('/properties', d); setShowAdd(false); invalidateProps(); }} />
           </DialogContent>
           </Dialog>
         </div>
@@ -188,7 +182,7 @@ export default function PropertiesPage() {
       <Dialog open={!!editProp} onOpenChange={(o) => { if (!o) setEditProp(null); }}>
         <DialogContent className="sm:max-w-lg" data-testid="edit-property-dialog">
           <DialogHeader><DialogTitle>Edit Property</DialogTitle></DialogHeader>
-          {editProp && <PropertyForm initial={editProp} onSubmit={async (d) => { await api.put(`/properties/${editProp.id}`, d); setEditProp(null); fetchProps(); }} />}
+          {editProp && <PropertyForm initial={editProp} onSubmit={async (d) => { await api.put(`/properties/${editProp.id}`, d); setEditProp(null); invalidateProps(); }} />}
         </DialogContent>
       </Dialog>
     </div>

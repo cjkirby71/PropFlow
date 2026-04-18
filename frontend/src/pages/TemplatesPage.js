@@ -1,5 +1,7 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import api from '../lib/api';
+import { useQueryClient } from '@tanstack/react-query';
+import { useTemplates, useDeleteTemplate } from '../hooks/useApi';
 import { Plus, FileText, Mail, MessageCircle, Sparkles, Trash2, Edit, Copy, Hash, MoreHorizontal, Search } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -24,31 +26,20 @@ const PURPOSES = [
 ];
 
 export default function TemplatesPage() {
-  const [templates, setTemplates] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
   const [showCreate, setShowCreate] = useState(false);
   const [editTpl, setEditTpl] = useState(null);
   const [showAI, setShowAI] = useState(false);
+  const queryClient = useQueryClient();
 
-  const fetchTemplates = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params = {};
-      if (filter !== 'all') params.category = filter;
-      const { data } = await api.get('/templates', { params });
-      setTemplates(data.data || data);
-    } catch (err) { console.error(err); }
-    setLoading(false);
-  }, [filter]);
+  const { data: templates = [], isLoading: loading, error } = useTemplates(filter);
+  const deleteTemplate = useDeleteTemplate();
+  const invalidateTemplates = () => queryClient.invalidateQueries({ queryKey: ['templates'] });
 
-  useEffect(() => { fetchTemplates(); }, [fetchTemplates]);
-
-  const handleDelete = async (id) => {
+  const handleDelete = (id) => {
     if (!window.confirm('Delete this template?')) return;
-    await api.delete(`/templates/${id}`);
-    fetchTemplates();
+    deleteTemplate.mutate(id);
   };
 
   const handleCopy = (tpl) => {
@@ -79,7 +70,7 @@ export default function TemplatesPage() {
             </DialogTrigger>
             <DialogContent className="sm:max-w-lg" data-testid="create-template-dialog">
               <DialogHeader><DialogTitle>Create Template</DialogTitle></DialogHeader>
-              <TemplateForm onSubmit={async (d) => { await api.post('/templates', d); setShowCreate(false); fetchTemplates(); }} />
+              <TemplateForm onSubmit={async (d) => { await api.post('/templates', d); setShowCreate(false); invalidateTemplates(); }} />
             </DialogContent>
           </Dialog>
         </div>
@@ -160,7 +151,7 @@ export default function TemplatesPage() {
       <Dialog open={!!editTpl} onOpenChange={o => { if (!o) setEditTpl(null); }}>
         <DialogContent className="sm:max-w-lg" data-testid="edit-template-dialog">
           <DialogHeader><DialogTitle>Edit Template</DialogTitle></DialogHeader>
-          {editTpl && <TemplateForm initial={editTpl} onSubmit={async (d) => { await api.put(`/templates/${editTpl.id}`, d); setEditTpl(null); fetchTemplates(); }} />}
+          {editTpl && <TemplateForm initial={editTpl} onSubmit={async (d) => { await api.put(`/templates/${editTpl.id}`, d); setEditTpl(null); invalidateTemplates(); }} />}
         </DialogContent>
       </Dialog>
 
@@ -168,7 +159,7 @@ export default function TemplatesPage() {
       <Dialog open={showAI} onOpenChange={setShowAI}>
         <DialogContent className="sm:max-w-lg" data-testid="ai-generate-template-dialog">
           <DialogHeader><DialogTitle className="flex items-center gap-2"><Sparkles className="w-4 h-4 text-amber-500" /> AI Generate Template</DialogTitle></DialogHeader>
-          <AITemplateGenerator onGenerated={(tpl) => { setShowAI(false); setShowCreate(true); }} onSave={async (d) => { await api.post('/templates', d); setShowAI(false); fetchTemplates(); }} />
+          <AITemplateGenerator onGenerated={(tpl) => { setShowAI(false); setShowCreate(true); }} onSave={async (d) => { await api.post('/templates', d); setShowAI(false); invalidateTemplates(); }} />
         </DialogContent>
       </Dialog>
     </div>

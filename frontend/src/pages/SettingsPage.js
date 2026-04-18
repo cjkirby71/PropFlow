@@ -1,6 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import api from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
+import { useApiKeys, useCreateApiKey, useDeleteApiKey, useTeamMembers, useInviteTeamMember, useRemoveTeamMember, useWebhooks, useCreateWebhook, useDeleteWebhook, useToggleWebhook } from '../hooks/useApi';
+import { useQueryClient } from '@tanstack/react-query';
 import { Key, Plus, Copy, Trash2, Eye, EyeOff, Users, Webhook, UserPlus, Shield, Globe, ToggleLeft, ToggleRight } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -48,26 +50,25 @@ export default function SettingsPage() {
 }
 
 function APIKeysSection() {
-  const [keys, setKeys] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [newKeyName, setNewKeyName] = useState('');
   const [newKey, setNewKey] = useState('');
   const [showKeys, setShowKeys] = useState({});
+  const queryClient = useQueryClient();
 
-  const fetchKeys = async () => {
-    setLoading(true);
-    try { const { data } = await api.get('/api-keys'); setKeys(data.data || data); } catch {}
-    setLoading(false);
-  };
-  useEffect(() => { fetchKeys(); }, []);
+  const { data: keys = [], isLoading: loading } = useApiKeys();
+  const deleteKey = useDeleteApiKey();
 
   const handleCreate = async () => {
-    try { const { data } = await api.post('/api-keys', { name: newKeyName || 'API Key' }); setNewKey(data.key); fetchKeys(); } catch (err) { alert(err.response?.data?.detail || err.message); }
+    try {
+      const { data } = await api.post('/api-keys', { name: newKeyName || 'API Key' });
+      setNewKey(data.key);
+      queryClient.invalidateQueries({ queryKey: ['api-keys'] });
+    } catch (err) { alert(err.response?.data?.detail || err.message); }
   };
-  const handleDelete = async (keyPreview) => {
+  const handleDelete = (keyPreview) => {
     if (!window.confirm('Delete this API key?')) return;
-    try { await api.delete(`/api-keys/${keyPreview}`); fetchKeys(); } catch {}
+    deleteKey.mutate(keyPreview);
   };
 
   return (
@@ -122,34 +123,29 @@ function APIKeysSection() {
 }
 
 function TeamSection({ isAdmin }) {
-  const [members, setMembers] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [showInvite, setShowInvite] = useState(false);
   const [inviteForm, setInviteForm] = useState({ email: '', name: '', role: 'agent' });
   const [inviteResult, setInviteResult] = useState(null);
+  const queryClient = useQueryClient();
 
-  const fetchMembers = async () => {
-    setLoading(true);
-    try { const { data } = await api.get('/team/members'); setMembers(data.data || data); } catch {}
-    setLoading(false);
-  };
-  useEffect(() => { fetchMembers(); }, []);
+  const { data: members = [], isLoading: loading } = useTeamMembers();
+  const removeMember = useRemoveTeamMember();
 
   const handleInvite = async () => {
     try {
       const { data } = await api.post('/team/invite', inviteForm);
       setInviteResult(data);
-      fetchMembers();
+      queryClient.invalidateQueries({ queryKey: ['team-members'] });
     } catch (err) { alert(err.response?.data?.detail || err.message); }
   };
 
-  const handleRemove = async (id) => {
+  const handleRemove = (id) => {
     if (!window.confirm('Remove this team member?')) return;
-    try { await api.delete(`/team/members/${id}`); fetchMembers(); } catch (err) { alert(err.response?.data?.detail || err.message); }
+    removeMember.mutate(id);
   };
 
   const handleRoleChange = async (id, role) => {
-    try { await api.put(`/team/members/${id}/role`, { role }); fetchMembers(); } catch {}
+    try { await api.put(`/team/members/${id}/role`, { role }); queryClient.invalidateQueries({ queryKey: ['team-members'] }); } catch {}
   };
 
   return (
@@ -226,30 +222,31 @@ function TeamSection({ isAdmin }) {
 }
 
 function WebhooksSection() {
-  const [webhooks, setWebhooks] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({ url: '', name: '', events: [] });
+  const queryClient = useQueryClient();
 
-  const fetchWebhooks = async () => {
-    setLoading(true);
-    try { const { data } = await api.get('/webhooks'); setWebhooks(data.data || data); } catch {}
-    setLoading(false);
-  };
-  useEffect(() => { fetchWebhooks(); }, []);
+  const { data: webhooks = [], isLoading: loading } = useWebhooks();
+  const deleteWebhook = useDeleteWebhook();
+  const toggleWebhook = useToggleWebhook();
 
   const handleCreate = async () => {
     if (!form.url || form.events.length === 0) return alert('URL and at least one event required');
-    try { await api.post('/webhooks', form); setShowAdd(false); setForm({ url: '', name: '', events: [] }); fetchWebhooks(); } catch (err) { alert(err.response?.data?.detail || err.message); }
+    try {
+      await api.post('/webhooks', form);
+      setShowAdd(false);
+      setForm({ url: '', name: '', events: [] });
+      queryClient.invalidateQueries({ queryKey: ['webhooks'] });
+    } catch (err) { alert(err.response?.data?.detail || err.message); }
   };
 
-  const handleDelete = async (id) => {
+  const handleDelete = (id) => {
     if (!window.confirm('Delete this webhook?')) return;
-    try { await api.delete(`/webhooks/${id}`); fetchWebhooks(); } catch {}
+    deleteWebhook.mutate(id);
   };
 
-  const handleToggle = async (id) => {
-    try { await api.put(`/webhooks/${id}/toggle`); fetchWebhooks(); } catch {}
+  const handleToggle = (id) => {
+    toggleWebhook.mutate(id);
   };
 
   const toggleEvent = (evt) => {

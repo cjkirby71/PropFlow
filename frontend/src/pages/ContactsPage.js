@@ -1,6 +1,8 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import api from '../lib/api';
+import { useContacts, useDeleteContact, useImportContacts } from '../hooks/useApi';
 import { Plus, Search, Phone, Mail, Building, Tag, MoreHorizontal, Sparkles, Trash2, Edit, Download, Upload, FileSpreadsheet } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -18,8 +20,6 @@ const PROPERTY_TYPES = [
 ];
 
 export default function ContactsPage() {
-  const [contacts, setContacts] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [searchParams] = useSearchParams();
   const [search, setSearch] = useState(searchParams.get('search') || '');
   const [filterType, setFilterType] = useState('');
@@ -27,31 +27,22 @@ export default function ContactsPage() {
   const [editContact, setEditContact] = useState(null);
   const navigate = useNavigate();
 
-  const fetchContacts = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params = {};
-      if (search) params.search = search;
-      if (filterType) params.property_type = filterType;
-      const { data } = await api.get('/contacts', { params });
-      setContacts(data.data || data);
-    } catch (err) { console.error(err); }
-    setLoading(false);
-  }, [search, filterType]);
+  const { data: contacts = [], isLoading: loading, error } = useContacts(search, filterType);
+  const deleteMutation = useDeleteContact();
+  const importMutation = useImportContacts();
+  const queryClient = useQueryClient();
 
-  useEffect(() => { fetchContacts(); }, [fetchContacts]);
+  const invalidateContacts = () => queryClient.invalidateQueries({ queryKey: ['contacts'] });
 
   const handleDelete = async (id) => {
     if (!window.confirm('Delete this contact?')) return;
-    await api.delete(`/contacts/${id}`);
-    fetchContacts();
+    deleteMutation.mutate(id);
   };
 
   const handleAIScore = async (id) => {
     try {
       const { data } = await api.post('/ai/lead-score', { contact_id: id });
       alert(`Lead Score: ${data.score}/100\n\n${data.reasoning}\n\nNext: ${data.next_action}`);
-      fetchContacts();
     } catch (err) {
       alert('AI scoring failed: ' + (err.response?.data?.detail || err.message));
     }
@@ -86,13 +77,18 @@ export default function ContactsPage() {
     if (!file) return;
     const formData = new FormData();
     formData.append('file', file);
-    try {
-      const { data } = await api.post('/contacts/import', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
-      alert(`Imported ${data.imported} of ${data.total_rows} contacts.${data.errors?.length ? `\n\nErrors:\n${data.errors.join('\n')}` : ''}`);
-      fetchContacts();
-    } catch (err) { alert('Import failed: ' + (err.response?.data?.detail || err.message)); }
+    importMutation.mutate(formData, {
+      onSuccess: ({ data }) => {
+        alert(`Imported ${data.imported} of ${data.total_rows} contacts.${data.errors?.length ? `\n\nErrors:\n${data.errors.join('\n')}` : ''}`);
+      },
+      onError: (err) => {
+        alert('Import failed: ' + (err.response?.data?.detail || err.message));
+      },
+    });
     e.target.value = '';
   };
+
+  if (error) return <div className="p-4 sm:p-6 lg:p-8"><div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">Failed to load contacts. Please try again.</div></div>;
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-[1600px] mx-auto space-y-5" data-testid="contacts-page">
@@ -122,7 +118,7 @@ export default function ContactsPage() {
             </DialogTrigger>
           <DialogContent className="sm:max-w-md" data-testid="add-contact-dialog">
             <DialogHeader><DialogTitle>Add New Contact</DialogTitle></DialogHeader>
-            <ContactForm onSubmit={async (d) => { await api.post('/contacts', d); setShowAdd(false); fetchContacts(); }} />
+            <ContactForm onSubmit={async (d) => { await api.post('/contacts', d); setShowAdd(false); invalidateContacts(); }} />
           </DialogContent>
         </Dialog>
         </div>
@@ -230,7 +226,7 @@ export default function ContactsPage() {
       <Dialog open={!!editContact} onOpenChange={(o) => { if (!o) setEditContact(null); }}>
         <DialogContent className="sm:max-w-md" data-testid="edit-contact-dialog">
           <DialogHeader><DialogTitle>Edit Contact</DialogTitle></DialogHeader>
-          {editContact && <ContactForm initial={editContact} onSubmit={async (d) => { await api.put(`/contacts/${editContact.id}`, d); setEditContact(null); fetchContacts(); }} />}
+          {editContact && <ContactForm initial={editContact} onSubmit={async (d) => { await api.put(`/contacts/${editContact.id}`, d); setEditContact(null); invalidateContacts(); }} />}
         </DialogContent>
       </Dialog>
     </div>

@@ -1,6 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../lib/api';
+import { useQueryClient } from '@tanstack/react-query';
+import { useContact, useActivities, useDeals, useTemplates } from '../hooks/useApi';
 import { ArrowLeft, Phone, Mail, Building, Tag, Sparkles, Plus, Clock, MessageSquare, PhoneCall, FileText, Send, MessageCircle } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
@@ -17,10 +19,7 @@ const ACTIVITY_ICONS = { call: PhoneCall, email: Mail, note: FileText, meeting: 
 export default function ContactDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const [contact, setContact] = useState(null);
-  const [activities, setActivities] = useState([]);
-  const [deals, setDeals] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
   const [showActivity, setShowActivity] = useState(false);
   const [showSendEmail, setShowSendEmail] = useState(false);
   const [showSendSMS, setShowSendSMS] = useState(false);
@@ -28,34 +27,26 @@ export default function ContactDetailPage() {
   const [smsForm, setSmsForm] = useState({ message: '' });
   const [sendingEmail, setSendingEmail] = useState(false);
   const [sendingSMS, setSendingSMS] = useState(false);
-  const [emailTemplates, setEmailTemplates] = useState([]);
-  const [smsTemplates, setSmsTemplates] = useState([]);
   const [emailLoading, setEmailLoading] = useState(false);
   const [scoreLoading, setScoreLoading] = useState(false);
 
-  useEffect(() => {
-    Promise.all([
-      api.get(`/contacts/${id}`),
-      api.get('/activities', { params: { contact_id: id, limit: 500 } }),
-      api.get('/deals', { params: { limit: 500 } }),
-      api.get('/templates', { params: { category: 'email', limit: 500 } }),
-      api.get('/templates', { params: { category: 'sms', limit: 500 } }),
-    ]).then(([c, a, d, et, st]) => {
-      setContact(c.data);
-      const actData = a.data.data || a.data;
-      setActivities(actData);
-      const dealsData = d.data.data || d.data;
-      setDeals(dealsData.filter(deal => deal.contact_id === id));
-      setEmailTemplates(et.data.data || et.data);
-      setSmsTemplates(st.data.data || st.data);
-      setLoading(false);
-    }).catch(() => { navigate('/contacts'); });
-  }, [id, navigate]);
+  const { data: contact, isLoading: contactLoading, error: contactError } = useContact(id);
+  const { data: allActivities = [] } = useActivities(id);
+  const activities = allActivities;
+  const { data: allDeals = [] } = useDeals();
+  const deals = allDeals.filter(d => d.contact_id === id);
+  const { data: emailTemplates = [] } = useTemplates('email');
+  const { data: smsTemplates = [] } = useTemplates('sms');
+  const loading = contactLoading;
+
+  if (contactError) { navigate('/contacts'); return null; }
+
+  const invalidateActivities = () => queryClient.invalidateQueries({ queryKey: ['activities'] });
+  const invalidateContact = () => queryClient.invalidateQueries({ queryKey: ['contacts', id] });
 
   const handleAddActivity = async (actData) => {
     await api.post('/activities', { ...actData, contact_id: id });
-    const { data } = await api.get('/activities', { params: { contact_id: id, limit: 500 } });
-    setActivities(data.data || data);
+    invalidateActivities();
     setShowActivity(false);
   };
 
@@ -64,8 +55,7 @@ export default function ContactDetailPage() {
     try {
       const { data } = await api.post('/ai/lead-score', { contact_id: id });
       alert(`Score: ${data.score}/100\n\n${data.reasoning}\n\nNext: ${data.next_action}`);
-      const { data: updated } = await api.get(`/contacts/${id}`);
-      setContact(updated);
+      invalidateContact();
     } catch (err) {
       alert('Scoring failed: ' + (err.response?.data?.detail || err.message));
     }
@@ -80,8 +70,7 @@ export default function ContactDetailPage() {
       alert('Email sent successfully!');
       setShowSendEmail(false);
       setEmailForm({ subject: '', body: '' });
-      const { data } = await api.get('/activities', { params: { contact_id: id, limit: 500 } });
-      setActivities(data.data || data);
+      invalidateActivities();
     } catch (err) {
       alert('Send failed: ' + (err.response?.data?.detail || err.message));
     }
@@ -96,8 +85,7 @@ export default function ContactDetailPage() {
       alert('SMS sent successfully!');
       setShowSendSMS(false);
       setSmsForm({ message: '' });
-      const { data } = await api.get('/activities', { params: { contact_id: id, limit: 500 } });
-      setActivities(data.data || data);
+      invalidateActivities();
     } catch (err) {
       alert('SMS failed: ' + (err.response?.data?.detail || err.message));
     }
