@@ -315,8 +315,74 @@ function WebhooksSection() {
 }
 
 function IntegrationsSection() {
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
+  const [autoAssign, setAutoAssign] = useState(user?.auto_assign || false);
+  const { useApi } = require('../hooks/useApi');
+  const { updateUserSettingsMutation } = useApi();
+  
+  const updateSettings = updateUserSettingsMutation({
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['auth', 'me'] });
+    }
+  });
+
+  const handleAutoAssignToggle = async () => {
+    const newValue = !autoAssign;
+    setAutoAssign(newValue);
+    await updateSettings.mutateAsync({ auto_assign: newValue });
+  };
+
   return (
     <div className="space-y-4" data-testid="integrations-section">
+      {/* Round-Robin Assignment */}
+      <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5">
+        <div className="flex items-start justify-between">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-lg bg-purple-100 flex items-center justify-center flex-shrink-0">
+              <Users className="w-5 h-5 text-purple-600" />
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">Round-Robin Lead Assignment</h3>
+              <p className="text-xs text-slate-500 mt-0.5">Automatically distribute new contacts and deals to agents with the fewest open deals</p>
+            </div>
+          </div>
+          <Button
+            variant={autoAssign ? "default" : "outline"}
+            size="sm"
+            onClick={handleAutoAssignToggle}
+            disabled={updateSettings.isPending}
+          >
+            {autoAssign ? <ToggleRight className="w-4 h-4 mr-1" /> : <ToggleLeft className="w-4 h-4 mr-1" />}
+            {autoAssign ? 'Enabled' : 'Disabled'}
+          </Button>
+        </div>
+        {autoAssign && (
+          <div className="mt-3 bg-green-50 border border-green-200 rounded-md p-3">
+            <p className="text-xs text-green-700">✓ Auto-assignment is active. New contacts and deals will be distributed fairly across your team.</p>
+          </div>
+        )}
+      </div>
+
+      {/* Google Calendar Sync */}
+      <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5">
+        <div className="flex items-start justify-between">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0">
+              <Globe className="w-5 h-5 text-blue-600" />
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">Google Calendar Sync</h3>
+              <p className="text-xs text-slate-500 mt-0.5">Sync PropFlow tasks and activities with Google Calendar</p>
+            </div>
+          </div>
+          <Badge variant="outline" className="text-xs border-amber-200 text-amber-700">Coming Soon</Badge>
+        </div>
+        <div className="mt-3 bg-slate-50 border border-slate-200 rounded-md p-3">
+          <p className="text-xs text-slate-600">Full Google Calendar integration will be available soon. Requires Google OAuth credentials.</p>
+        </div>
+      </div>
+
       {/* Brevo */}
       <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5">
         <div className="flex items-start justify-between">
@@ -377,6 +443,8 @@ function IntegrationsSection() {
             { method: 'POST', path: '/api/contacts/import', desc: 'CSV import' },
             { method: 'GET', path: '/api/contacts/export', desc: 'CSV export' },
             { method: 'POST', path: '/api/deals', desc: 'Create deal' },
+            { method: 'POST', path: '/api/sequences', desc: 'Create drip sequence' },
+            { method: 'GET', path: '/api/reports', desc: 'Analytics & reporting' },
             { method: 'POST', path: '/api/activities', desc: 'Log activity' },
             { method: 'POST', path: '/api/tasks', desc: 'Create task' },
             { method: 'POST', path: '/api/email/send', desc: 'Send email' },

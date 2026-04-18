@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import {
-  LayoutDashboard, Users, Building2, Kanban, CheckSquare, Settings, LogOut, Menu, X, Sparkles, Search, CalendarDays, FileText
+  LayoutDashboard, Users, Building2, Kanban, CheckSquare, Settings, LogOut, Menu, X, Sparkles, Search, CalendarDays, FileText, TrendingUp, Zap
 } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -13,9 +13,18 @@ const navItems = [
   { to: '/pipeline', icon: Kanban, label: 'Pipeline' },
   { to: '/properties', icon: Building2, label: 'Properties' },
   { to: '/tasks', icon: CheckSquare, label: 'Tasks' },
+  { to: '/sequences', icon: Zap, label: 'Sequences' },
+  { to: '/analytics', icon: TrendingUp, label: 'Analytics' },
   { to: '/calendar', icon: CalendarDays, label: 'Calendar' },
   { to: '/templates', icon: FileText, label: 'Templates' },
   { to: '/settings', icon: Settings, label: 'Settings' },
+];
+
+const mobileNavItems = [
+  { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
+  { to: '/contacts', icon: Users, label: 'Contacts' },
+  { to: '/pipeline', icon: Kanban, label: 'Pipeline' },
+  { to: '/tasks', icon: CheckSquare, label: 'Tasks' },
 ];
 
 export default function Layout() {
@@ -125,9 +134,31 @@ export default function Layout() {
           </div>
         </header>
         {/* Page content */}
-        <main className="flex-1 overflow-y-auto">
+        <main className="flex-1 overflow-y-auto pb-20 md:pb-0">
           <Outlet />
         </main>
+        {/* Mobile Bottom Navigation */}
+        <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 z-40">
+          <div className="flex items-center justify-around h-16 px-2">
+            {mobileNavItems.map(({ to, icon: Icon, label }) => (
+              <NavLink
+                key={to}
+                to={to}
+                end={to === '/'}
+                className={({ isActive }) =>
+                  `flex flex-col items-center justify-center flex-1 h-full space-y-1 transition-colors ${
+                    isActive
+                      ? 'text-slate-900'
+                      : 'text-slate-500'
+                  }`
+                }
+              >
+                <Icon className="w-5 h-5" />
+                <span className="text-xs font-medium">{label}</span>
+              </NavLink>
+            ))}
+          </div>
+        </nav>
       </div>
     </div>
   );

@@ -19,6 +19,7 @@ import io
 import json
 import traceback
 import httpx
+import asyncio
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
 from datetime import datetime, timezone, timedelta
@@ -148,6 +149,155 @@ def guard_ai_cost(input_text: str):
         )
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# SEQUENCE POLLING WORKER: MongoDB-backed drip campaign executor
+# Runs every 60 seconds, finds pending sequence_executions, and sends emails/SMS
+# Uses atomic find_and_modify to prevent duplicate sends across workers
+# ═══════════════════════════════════════════════════════════════════════════════
+async def process_sequence_executions():
+    """Background worker that polls for pending sequence executions and processes them."""
+    import asyncio
+    
+    while True:
+        try:
+            # Find executions that are pending and scheduled to run now or earlier
+            now = datetime.now(timezone.utc)
+            
+            # Atomic find and lock: prevents race conditions across multiple workers
+            execution = await db.sequence_executions.find_one_and_update(
+                {
+                    "status": "pending",
+                    "scheduled_at": {"$lte": now.isoformat()}
+                },
+                {
+                    "$set": {
+                        "status": "processing",
+                        "started_at": now.isoformat()
+                    }
+                },
+                sort=[("scheduled_at", 1)]  # Process oldest first
+            )
+            
+            if not execution:
+                # No pending executions; sleep for 60 seconds
+                await asyncio.sleep(60)
+                continue
+            
+            # Process the execution
+            try:
+                sequence = await db.sequences.find_one({"_id": ObjectId(execution["sequence_id"])}, {"_id": 0})
+                contact = await db.contacts.find_one({"_id": ObjectId(execution["contact_id"])}, {"_id": 0})
+                
+                if not sequence or not contact:
+                    logger.warning(f"Sequence or contact not found for execution {execution.get('_id')}")
+                    await db.sequence_executions.update_one(
+                        {"_id": execution["_id"]},
+                        {"$set": {"status": "failed", "error": "Sequence or contact not found", "completed_at": datetime.now(timezone.utc).isoformat()}}
+                    )
+                    continue
+                
+                if not sequence.get("active"):
+                    logger.info(f"Sequence {sequence.get('name')} is inactive, skipping execution")
+                    await db.sequence_executions.update_one(
+                        {"_id": execution["_id"]},
+                        {"$set": {"status": "skipped", "completed_at": datetime.now(timezone.utc).isoformat()}}
+                    )
+                    continue
+                
+                step = sequence["steps"][execution["step_index"]]
+                
+                # Replace variables in subject/body
+                body = step["body"]
+                subject = step.get("subject", "")
+                body = body.replace("{{contact.name}}", contact.get("name", "there"))
+                body = body.replace("{{contact.email}}", contact.get("email", ""))
+                subject = subject.replace("{{contact.name}}", contact.get("name", ""))
+                
+                # Send email or SMS
+                if step["type"] == "email":
+                    if contact.get("email"):
+                        try:
+                            # Use Brevo or fallback to logging
+                            brevo_key = os.environ.get("BREVO_API_KEY")
+                            if brevo_key:
+                                send_email_with_retry(brevo_key, contact["email"], subject, body)
+                                logger.info(f"Sequence email sent to {contact['email']}")
+                            else:
+                                logger.warning(f"Brevo not configured. Would send email to {contact['email']}: {subject}")
+                        except Exception as e:
+                            logger.error(f"Failed to send sequence email: {e}")
+                            raise
+                    else:
+                        logger.warning(f"Contact {contact.get('name')} has no email address")
+                
+                elif step["type"] == "sms":
+                    if contact.get("phone"):
+                        try:
+                            # Use Twilio or fallback to logging
+                            account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
+                            auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
+                            from_number = os.environ.get("TWILIO_PHONE_NUMBER")
+                            if account_sid and auth_token and from_number:
+                                send_sms_with_retry(account_sid, auth_token, from_number, contact["phone"], body)
+                                logger.info(f"Sequence SMS sent to {contact['phone']}")
+                            else:
+                                logger.warning(f"Twilio not configured. Would send SMS to {contact['phone']}: {body}")
+                        except Exception as e:
+                            logger.error(f"Failed to send sequence SMS: {e}")
+                            raise
+                    else:
+                        logger.warning(f"Contact {contact.get('name')} has no phone number")
+                
+                # Mark as completed
+                await db.sequence_executions.update_one(
+                    {"_id": execution["_id"]},
+                    {"$set": {"status": "completed", "completed_at": datetime.now(timezone.utc).isoformat()}}
+                )
+                
+                # Log activity
+                await db.activities.insert_one({
+                    "user_id": contact["user_id"],
+                    "contact_id": str(contact["_id"]),
+                    "type": f"sequence_{step['type']}",
+                    "title": f"Drip Sequence: {sequence['name']}",
+                    "description": f"Step {execution['step_index'] + 1}: {step['type']}",
+                    "metadata": {"sequence_id": execution["sequence_id"], "step_index": execution["step_index"]},
+                    "created_at": datetime.now(timezone.utc).isoformat()
+                })
+                
+                # Schedule next step if exists
+                if execution["step_index"] + 1 < len(sequence["steps"]):
+                    next_step = sequence["steps"][execution["step_index"] + 1]
+                    next_scheduled = datetime.now(timezone.utc) + timedelta(days=next_step["delay_days"])
+                    
+                    # Check if next execution already exists (idempotent)
+                    existing_next = await db.sequence_executions.find_one({
+                        "sequence_id": execution["sequence_id"],
+                        "contact_id": execution["contact_id"],
+                        "step_index": execution["step_index"] + 1
+                    })
+                    
+                    if not existing_next:
+                        await db.sequence_executions.insert_one({
+                            "sequence_id": execution["sequence_id"],
+                            "contact_id": execution["contact_id"],
+                            "step_index": execution["step_index"] + 1,
+                            "status": "pending",
+                            "scheduled_at": next_scheduled.isoformat(),
+                            "created_at": datetime.now(timezone.utc).isoformat()
+                        })
+                
+            except Exception as e:
+                logger.error(f"Error processing sequence execution {execution.get('_id')}: {e}")
+                await db.sequence_executions.update_one(
+                    {"_id": execution["_id"]},
+                    {"$set": {"status": "failed", "error": str(e), "completed_at": datetime.now(timezone.utc).isoformat()}}
+                )
+        
+        except Exception as e:
+            logger.error(f"Error in sequence polling worker: {e}")
+            await asyncio.sleep(60)
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # RETRY LOGIC: Twilio SMS with exponential backoff
 # 3 attempts, waits 1s → 2s → 4s between retries
 # Only retries on transient network/service errors, not auth failures
@@ -167,6 +317,36 @@ def send_sms_with_retry(account_sid: str, auth_token: str, from_number: str, to_
         client = TwilioClient(account_sid, auth_token)
         return client.messages.create(body=message, from_=from_number, to=to_phone)
 
+    return _send()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RETRY LOGIC: Brevo Email with exponential backoff
+# 3 attempts, waits 1s → 2s → 4s between retries
+# Only retries on transient network/service errors, not auth failures
+# ═══════════════════════════════════════════════════════════════════════════════
+def send_email_with_retry(api_key: str, to_email: str, subject: str, html_content: str):
+    """Synchronous Brevo email call wrapped with tenacity retry."""
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=8),
+        retry=retry_if_exception_type((ConnectionError, TimeoutError, OSError)),
+        reraise=True,
+    )
+    def _send():
+        response = httpx.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={"api-key": api_key, "Content-Type": "application/json"},
+            json={
+                "sender": {"email": "noreply@propflow.com", "name": "PropFlow CRM"},
+                "to": [{"email": to_email}],
+                "subject": subject,
+                "htmlContent": html_content
+            },
+            timeout=10
+        )
+        response.raise_for_status()
+        return response
+    
     return _send()
 
 # ─── Password Hashing ───
@@ -483,6 +663,47 @@ class TemplateCreate(BaseModel):
             raise ValueError("category must be 'email' or 'sms'")
         return v
 
+class SequenceStepCreate(BaseModel):
+    type: str = Field(..., max_length=20)  # "email" or "sms"
+    delay_days: int = Field(default=0, ge=0, le=365)
+    template_id: Optional[str] = None
+    subject: Optional[str] = Field(default="", max_length=500)
+    body: str = Field(..., min_length=1, max_length=50000)
+
+    @field_validator("type")
+    @classmethod
+    def validate_step_type(cls, v):
+        if v not in ("email", "sms"):
+            raise ValueError("type must be 'email' or 'sms'")
+        return v
+
+class SequenceCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    trigger: str = Field(..., max_length=50)  # "contact_created", "deal_stage_changed", etc.
+    trigger_value: Optional[str] = Field(default="", max_length=100)
+    steps: List[SequenceStepCreate]
+    active: bool = Field(default=True)
+
+    @field_validator("trigger")
+    @classmethod
+    def validate_trigger(cls, v):
+        valid_triggers = ["contact_created", "deal_stage_changed", "property_viewed", "manual"]
+        if v not in valid_triggers:
+            raise ValueError(f"trigger must be one of {valid_triggers}")
+        return v
+
+class SequenceUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    trigger: Optional[str] = Field(default=None, max_length=50)
+    trigger_value: Optional[str] = Field(default=None, max_length=100)
+    steps: Optional[List[SequenceStepCreate]] = None
+    active: Optional[bool] = None
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    auto_assign: Optional[bool] = None
+    email_signature: Optional[str] = Field(default=None, max_length=2000)
+
 # ─── Stage Automation Config ───
 STAGE_AUTO_TASKS = {
     "Contacted": {"title": "Follow up within 24 hours", "priority": "high", "days_offset": 1},
@@ -701,6 +922,37 @@ async def create_mongodb_indexes():
         sparse=True
     )
 
+    # ── sequences collection ──
+    # List sequences for a user
+    await db.sequences.create_index(
+        [("user_id", 1), ("created_at", -1)],
+        background=True,
+        name="idx_sequences_user_created"
+    )
+    # Find active sequences by trigger type
+    await db.sequences.create_index(
+        [("user_id", 1), ("trigger", 1), ("active", 1)],
+        background=True,
+        name="idx_sequences_user_trigger_active"
+    )
+
+    # ── sequence_executions collection ──
+    # Find pending executions to process
+    await db.sequence_executions.create_index(
+        [("status", 1), ("scheduled_at", 1)],
+        background=True,
+        name="idx_executions_status_scheduled"
+    )
+    # Prevent duplicate executions for the same contact/sequence/step
+    await db.sequence_executions.create_index(
+        [("sequence_id", 1), ("contact_id", 1), ("step_index", 1)],
+        unique=True,
+        background=True,
+        name="idx_executions_seq_contact_step_unique"
+    )
+    # Lookup executions for a contact
+    await db.sequence_executions.create_index("contact_id", background=True)
+
     logger.info("MongoDB indexes created successfully.")
 
 # ─── Auth Routes ───
@@ -798,10 +1050,57 @@ async def create_contact(data: ContactCreate, background_tasks: BackgroundTasks,
     doc["user_id"] = user["_id"]
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
     doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+    
+    # FEATURE: Round-Robin Assignment
+    # If user has auto_assign enabled, assign to the agent with fewest open deals
+    user_settings = await db.users.find_one({"_id": ObjectId(user["_id"])}, {"_id": 0, "auto_assign": 1})
+    if user_settings and user_settings.get("auto_assign"):
+        # Find all team members
+        team_members = await db.users.find({"role": {"$in": ["agent", "admin"]}}, {"_id": 1}).to_list(100)
+        if team_members:
+            # Count open deals for each agent
+            agent_deal_counts = []
+            for agent in team_members:
+                agent_id = str(agent["_id"])
+                open_deals = await db.deals.count_documents({"assigned_to": agent_id, "stage": {"$ne": "Closed"}})
+                agent_deal_counts.append({"agent_id": agent_id, "open_deals": open_deals})
+            # Sort by fewest open deals
+            agent_deal_counts.sort(key=lambda x: x["open_deals"])
+            # Assign to agent with fewest deals
+            doc["assigned_to"] = agent_deal_counts[0]["agent_id"]
+            logger.info(f"Round-robin assignment: contact assigned to {doc['assigned_to']}")
+    
     result = await db.contacts.insert_one(doc)
     doc["id"] = str(result.inserted_id)
+    contact_id = doc["id"]
     del doc["_id"]
+    
     background_tasks.add_task(trigger_webhooks, user["_id"], "new_lead", {"contact_id": doc["id"], "name": doc["name"], "email": doc.get("email", "")})
+    
+    # FEATURE: Trigger Drip Sequences
+    # Find active sequences with trigger="contact_created"
+    active_sequences = await db.sequences.find({"user_id": user["_id"], "trigger": "contact_created", "active": True}, {"_id": 0}).to_list(100)
+    for sequence in active_sequences:
+        if sequence.get("steps"):
+            first_step = sequence["steps"][0]
+            scheduled_at = datetime.now(timezone.utc) + timedelta(days=first_step["delay_days"])
+            # Check if execution already exists (prevent duplicates)
+            existing = await db.sequence_executions.find_one({
+                "sequence_id": sequence["id"],
+                "contact_id": contact_id,
+                "step_index": 0
+            })
+            if not existing:
+                await db.sequence_executions.insert_one({
+                    "sequence_id": sequence["id"],
+                    "contact_id": contact_id,
+                    "step_index": 0,
+                    "status": "pending",
+                    "scheduled_at": scheduled_at.isoformat(),
+                    "created_at": datetime.now(timezone.utc).isoformat()
+                })
+                logger.info(f"Contact {contact_id} enrolled in sequence {sequence['name']}")
+    
     return doc
 
 @api_router.get("/contacts")
@@ -1056,6 +1355,27 @@ async def create_deal(data: DealCreate, user=Depends(get_any_auth_user)):
     doc["user_id"] = user["_id"]
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
     doc["updated_at"] = datetime.now(timezone.utc).isoformat()
+    
+    # FEATURE: Round-Robin Assignment
+    # If assigned_to is not provided and user has auto_assign enabled
+    if not doc.get("assigned_to"):
+        user_settings = await db.users.find_one({"_id": ObjectId(user["_id"])}, {"_id": 0, "auto_assign": 1})
+        if user_settings and user_settings.get("auto_assign"):
+            # Find all team members
+            team_members = await db.users.find({"role": {"$in": ["agent", "admin"]}}, {"_id": 1}).to_list(100)
+            if team_members:
+                # Count open deals for each agent
+                agent_deal_counts = []
+                for agent in team_members:
+                    agent_id = str(agent["_id"])
+                    open_deals = await db.deals.count_documents({"assigned_to": agent_id, "stage": {"$ne": "Closed"}})
+                    agent_deal_counts.append({"agent_id": agent_id, "open_deals": open_deals})
+                # Sort by fewest open deals
+                agent_deal_counts.sort(key=lambda x: x["open_deals"])
+                # Assign to agent with fewest deals
+                doc["assigned_to"] = agent_deal_counts[0]["agent_id"]
+                logger.info(f"Round-robin assignment: deal assigned to {doc['assigned_to']}")
+    
     result = await db.deals.insert_one(doc)
     doc["id"] = str(result.inserted_id)
     del doc["_id"]
@@ -1372,41 +1692,54 @@ async def import_contacts(file: UploadFile = File(...), user=Depends(get_any_aut
                 rows.append(row)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to parse file: {str(e)}")
+    
+    # FEATURE: Chunked import for large files (5000 rows at a time)
+    CHUNK_SIZE = 5000
+    total_rows = len(rows)
     imported = 0
     errors_list = []
-    for i, row in enumerate(rows):
-        try:
-            name = str(row.get("name", "")).strip()
-            if not name:
-                errors_list.append(f"Row {i+1}: Missing name")
-                continue
-            source_val = str(row.get("source", "csv_import")).strip()
-            if not source_val:
-                source_val = "csv_import"
-            prop_type = str(row.get("property_type", "residential_lease")).strip()
-            if prop_type not in ("residential_lease", "commercial_sale", "commercial_lease"):
-                prop_type = "residential_lease"
-            tags_raw = str(row.get("tags", "")).strip()
-            tags = [t.strip() for t in tags_raw.split(",") if t.strip()] if tags_raw else []
-            doc = {
-                "name": name,
-                "email": str(row.get("email", "")).strip(),
-                "phone": str(row.get("phone", "")).strip(),
-                "company": str(row.get("company", "")).strip(),
-                "source": source_val,
-                "property_type": prop_type,
-                "tags": tags,
-                "notes": str(row.get("notes", "")).strip(),
-                "lead_score": int(row.get("lead_score", 0) or 0),
-                "user_id": user["_id"],
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }
-            await db.contacts.insert_one(doc)
-            imported += 1
-        except Exception as e:
-            errors_list.append(f"Row {i+1}: {str(e)}")
-    return {"imported": imported, "total_rows": len(rows), "errors": errors_list}
+    
+    for chunk_start in range(0, total_rows, CHUNK_SIZE):
+        chunk_end = min(chunk_start + CHUNK_SIZE, total_rows)
+        chunk = rows[chunk_start:chunk_end]
+        
+        for i, row in enumerate(chunk):
+            row_num = chunk_start + i + 1
+            try:
+                name = str(row.get("name", "")).strip()
+                if not name:
+                    errors_list.append(f"Row {row_num}: Missing name")
+                    continue
+                source_val = str(row.get("source", "csv_import")).strip()
+                if not source_val:
+                    source_val = "csv_import"
+                prop_type = str(row.get("property_type", "residential_lease")).strip()
+                if prop_type not in ("residential_lease", "commercial_sale", "commercial_lease"):
+                    prop_type = "residential_lease"
+                tags_raw = str(row.get("tags", "")).strip()
+                tags = [t.strip() for t in tags_raw.split(",") if t.strip()] if tags_raw else []
+                doc = {
+                    "name": name,
+                    "email": str(row.get("email", "")).strip(),
+                    "phone": str(row.get("phone", "")).strip(),
+                    "company": str(row.get("company", "")).strip(),
+                    "source": source_val,
+                    "property_type": prop_type,
+                    "tags": tags,
+                    "notes": str(row.get("notes", "")).strip(),
+                    "lead_score": int(row.get("lead_score", 0) or 0),
+                    "user_id": user["_id"],
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+                await db.contacts.insert_one(doc)
+                imported += 1
+            except Exception as e:
+                errors_list.append(f"Row {row_num}: {str(e)}")
+        
+        logger.info(f"Import progress: {chunk_end}/{total_rows} rows processed")
+    
+    return {"imported": imported, "total_rows": total_rows, "errors": errors_list}
 
 # ─── Message Templates ───
 @api_router.post("/templates")
@@ -1739,6 +2072,244 @@ async def dashboard_stats(user=Depends(get_any_auth_user)):
         "recent_activities": [serialize_doc(a) for a in recent_activities],
     }
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# FEATURE: Drip Sequences
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@api_router.get("/sequences")
+async def list_sequences(user=Depends(get_current_user), page: int = 1, limit: int = 50):
+    uid = user["_id"]
+    pg = max(1, page)
+    lim = max(1, min(limit, PAGINATION_MAX_LIMIT))
+    skip_count = (pg - 1) * lim
+    total = await db.sequences.count_documents({"user_id": uid})
+    sequences = await db.sequences.find({"user_id": uid}, {"_id": 0}).sort("created_at", -1).skip(skip_count).limit(lim).to_list(lim)
+    return {
+        "data": sequences,
+        "pagination": {"page": pg, "limit": lim, "total": total, "total_pages": math.ceil(total / lim) if lim > 0 else 1}
+    }
+
+@api_router.post("/sequences")
+async def create_sequence(data: SequenceCreate, user=Depends(get_current_user)):
+    doc = {
+        "id": str(ObjectId()),
+        "user_id": user["_id"],
+        "name": data.name,
+        "trigger": data.trigger,
+        "trigger_value": data.trigger_value or "",
+        "steps": [{"type": s.type, "delay_days": s.delay_days, "template_id": s.template_id, "subject": s.subject, "body": s.body} for s in data.steps],
+        "active": data.active,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.sequences.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@api_router.get("/sequences/{sequence_id}")
+async def get_sequence(sequence_id: str, user=Depends(get_current_user)):
+    sequence = await db.sequences.find_one({"id": sequence_id, "user_id": user["_id"]}, {"_id": 0})
+    if not sequence:
+        raise HTTPException(status_code=404, detail="Sequence not found")
+    return sequence
+
+@api_router.put("/sequences/{sequence_id}")
+async def update_sequence(sequence_id: str, data: SequenceUpdate, user=Depends(get_current_user)):
+    update_data = {}
+    if data.name is not None:
+        update_data["name"] = data.name
+    if data.trigger is not None:
+        update_data["trigger"] = data.trigger
+    if data.trigger_value is not None:
+        update_data["trigger_value"] = data.trigger_value
+    if data.steps is not None:
+        update_data["steps"] = [{"type": s.type, "delay_days": s.delay_days, "template_id": s.template_id, "subject": s.subject, "body": s.body} for s in data.steps]
+    if data.active is not None:
+        update_data["active"] = data.active
+    
+    result = await db.sequences.update_one({"id": sequence_id, "user_id": user["_id"]}, {"$set": update_data})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Sequence not found")
+    return {"message": "Sequence updated"}
+
+@api_router.delete("/sequences/{sequence_id}")
+async def delete_sequence(sequence_id: str, user=Depends(get_current_user)):
+    result = await db.sequences.delete_one({"id": sequence_id, "user_id": user["_id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Sequence not found")
+    # Also delete any pending executions
+    await db.sequence_executions.delete_many({"sequence_id": sequence_id, "status": "pending"})
+    return {"message": "Sequence deleted"}
+
+@api_router.post("/sequences/{sequence_id}/enroll/{contact_id}")
+async def enroll_contact_in_sequence(sequence_id: str, contact_id: str, user=Depends(get_current_user)):
+    """Manually enroll a contact in a drip sequence."""
+    sequence = await db.sequences.find_one({"id": sequence_id, "user_id": user["_id"]}, {"_id": 0})
+    if not sequence:
+        raise HTTPException(status_code=404, detail="Sequence not found")
+    
+    contact = await db.contacts.find_one({"id": contact_id, "user_id": user["_id"]}, {"_id": 0})
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    
+    if not sequence.get("active"):
+        raise HTTPException(status_code=400, detail="Sequence is not active")
+    
+    if not sequence.get("steps"):
+        raise HTTPException(status_code=400, detail="Sequence has no steps")
+    
+    # Check if already enrolled (prevent duplicates)
+    existing = await db.sequence_executions.find_one({
+        "sequence_id": sequence_id,
+        "contact_id": contact_id,
+        "step_index": 0
+    })
+    if existing:
+        raise HTTPException(status_code=400, detail="Contact already enrolled in this sequence")
+    
+    # Schedule first step
+    first_step = sequence["steps"][0]
+    scheduled_at = datetime.now(timezone.utc) + timedelta(days=first_step["delay_days"])
+    
+    await db.sequence_executions.insert_one({
+        "sequence_id": sequence_id,
+        "contact_id": contact_id,
+        "step_index": 0,
+        "status": "pending",
+        "scheduled_at": scheduled_at.isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    
+    return {"message": "Contact enrolled in sequence", "scheduled_at": scheduled_at.isoformat()}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FEATURE: Analytics & Reporting
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@api_router.get("/reports")
+async def get_reports(user=Depends(get_current_user)):
+    """Generate analytics report with MongoDB aggregation pipelines."""
+    uid = user["_id"]
+    
+    # 1. Stage Conversion Rates (for each pipeline type)
+    pipeline_stages = {}
+    for pipeline_type, stages in PIPELINE_STAGES.items():
+        stage_counts = {}
+        for stage in stages:
+            count = await db.deals.count_documents({"user_id": uid, "pipeline_type": pipeline_type, "stage": stage})
+            stage_counts[stage] = count
+        pipeline_stages[pipeline_type] = stage_counts
+    
+    # 2. Activity Counts by Type (last 30 days)
+    thirty_days_ago = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    activities_pipeline = [
+        {"$match": {"user_id": uid, "created_at": {"$gte": thirty_days_ago}}},
+        {"$group": {"_id": "$type", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}}
+    ]
+    activity_counts = await db.activities.aggregate(activities_pipeline).to_list(100)
+    activity_counts_dict = {a["_id"]: a["count"] for a in activity_counts}
+    
+    # 3. Lead Velocity (new contacts per week for last 8 weeks)
+    lead_velocity = []
+    for i in range(8):
+        week_start = (datetime.now(timezone.utc) - timedelta(weeks=i+1)).isoformat()
+        week_end = (datetime.now(timezone.utc) - timedelta(weeks=i)).isoformat()
+        count = await db.contacts.count_documents({
+            "user_id": uid,
+            "created_at": {"$gte": week_start, "$lt": week_end}
+        })
+        lead_velocity.append({"week": f"Week {8-i}", "count": count})
+    lead_velocity.reverse()
+    
+    # 4. Monthly Pipeline Value (sum of deal values by month)
+    pipeline_value_pipeline = [
+        {"$match": {"user_id": uid}},
+        {"$group": {
+            "_id": {"$substr": ["$created_at", 0, 7]},  # Group by YYYY-MM
+            "total_value": {"$sum": "$value"}
+        }},
+        {"$sort": {"_id": 1}},
+        {"$limit": 12}
+    ]
+    pipeline_values = await db.deals.aggregate(pipeline_value_pipeline).to_list(12)
+    monthly_values = [{"month": pv["_id"], "value": pv["total_value"]} for pv in pipeline_values]
+    
+    # 5. Deal Win Rate (Closed vs Total)
+    total_deals = await db.deals.count_documents({"user_id": uid})
+    won_deals = await db.deals.count_documents({"user_id": uid, "stage": "Closed"})
+    win_rate = round((won_deals / total_deals * 100), 2) if total_deals > 0 else 0
+    
+    # 6. Average Deal Value
+    all_deals = await db.deals.find({"user_id": uid}, {"value": 1, "_id": 0}).to_list(10000)
+    deal_values = [d.get("value", 0) for d in all_deals]
+    avg_deal_value = round(sum(deal_values) / len(deal_values), 2) if deal_values else 0
+    
+    return {
+        "pipeline_stages": pipeline_stages,
+        "activity_counts": activity_counts_dict,
+        "lead_velocity": lead_velocity,
+        "monthly_pipeline_values": monthly_values,
+        "win_rate": win_rate,
+        "total_deals": total_deals,
+        "won_deals": won_deals,
+        "avg_deal_value": avg_deal_value
+    }
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FEATURE: User Settings Update (for auto_assign)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@api_router.put("/users/me")
+async def update_user_settings(data: UserUpdate, user=Depends(get_current_user)):
+    update_data = {}
+    if data.name is not None:
+        update_data["name"] = data.name
+    if data.auto_assign is not None:
+        update_data["auto_assign"] = data.auto_assign
+    if data.email_signature is not None:
+        update_data["email_signature"] = data.email_signature
+    
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    
+    await db.users.update_one({"_id": ObjectId(user["_id"])}, {"$set": update_data})
+    return {"message": "User settings updated"}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FEATURE: IDX Webhooks Placeholder
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@api_router.post("/webhooks/idx")
+async def idx_webhook(request: Request):
+    """
+    Placeholder endpoint for IDX/Zillow lead webhooks.
+    TODO: Parse IDX payload and create contact/property records.
+    """
+    payload = await request.json()
+    logger.info(f"IDX webhook received: {payload}")
+    # Future: Parse payload and create contacts/properties
+    return {"status": "received", "message": "IDX webhook placeholder — not yet implemented"}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FEATURE: Google Calendar Sync Placeholders
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@api_router.get("/calendar/auth")
+async def calendar_auth_start(user=Depends(get_current_user)):
+    """
+    Placeholder: Initiate Google Calendar OAuth flow.
+    TODO: Redirect to Google OAuth consent screen.
+    """
+    return {"status": "not_implemented", "message": "Google Calendar OAuth not yet configured. Add Google OAuth credentials."}
+
+@api_router.post("/calendar/sync")
+async def calendar_sync(user=Depends(get_current_user)):
+    """
+    Placeholder: Sync tasks/activities with Google Calendar.
+    TODO: Use Google Calendar API to create/update events.
+    """
+    return {"status": "not_implemented", "message": "Google Calendar sync not yet configured. Complete OAuth integration first."}
+
 # ─── Startup ───
 @app.on_event("startup")
 async def startup():
@@ -1765,6 +2336,10 @@ async def startup():
     os.makedirs("/app/memory", exist_ok=True)
     with open("/app/memory/test_credentials.md", "w") as f:
         f.write(f"# Test Credentials\n\n## Admin\n- Email: {admin_email}\n- Password: {admin_password}\n- Role: admin\n\n## Auth Endpoints\n- POST /api/auth/register\n- POST /api/auth/login\n- POST /api/auth/logout\n- GET /api/auth/me\n- POST /api/auth/refresh\n")
+    
+    # ── Start background sequence polling worker ──
+    asyncio.create_task(process_sequence_executions())
+    logger.info("Sequence polling worker started")
 
 app.include_router(api_router)
 

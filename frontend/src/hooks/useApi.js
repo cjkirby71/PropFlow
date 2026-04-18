@@ -400,3 +400,83 @@ export function useToggleWebhook() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['webhooks'] }),
   });
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEQUENCES
+// ─────────────────────────────────────────────────────────────────────────────
+export function useSequences() {
+  return useQuery({
+    queryKey: ['sequences'],
+    queryFn: async () => {
+      const res = await api.get('/sequences', { params: { limit: 100 } });
+      return unwrap(res);
+    },
+  });
+}
+
+export function useCreateSequence() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data) => api.post('/sequences', data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['sequences'] }),
+  });
+}
+
+export function useUpdateSequence() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }) => api.put(`/sequences/${id}`, data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['sequences'] }),
+  });
+}
+
+export function useDeleteSequence() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id) => api.delete(`/sequences/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['sequences'] }),
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ANALYTICS & REPORTS
+// ─────────────────────────────────────────────────────────────────────────────
+export function useReports() {
+  return useQuery({
+    queryKey: ['reports'],
+    queryFn: async () => (await api.get('/reports')).data,
+    staleTime: 5 * 60 * 1000, // 5 minutes
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USER SETTINGS
+// ─────────────────────────────────────────────────────────────────────────────
+export function useUpdateUserSettings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data) => api.put('/users/me', data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['auth', 'me'] });
+    },
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Centralized useApi hook (exports all query/mutation builders)
+// ═══════════════════════════════════════════════════════════════════════════════
+export function useApi() {
+  return {
+    // Sequences
+    sequencesQuery: useSequences,
+    createSequenceMutation: useCreateSequence,
+    updateSequenceMutation: useUpdateSequence,
+    deleteSequenceMutation: useDeleteSequence,
+    
+    // Reports
+    reportsQuery: useReports,
+    
+    // User Settings
+    updateUserSettingsMutation: useUpdateUserSettings,
+  };
+}

@@ -15,6 +15,8 @@ import TasksPage from './pages/TasksPage';
 import CalendarPage from './pages/CalendarPage';
 import TemplatesPage from './pages/TemplatesPage';
 import SettingsPage from './pages/SettingsPage';
+import SequencesPage from './pages/SequencesPage';
+import AnalyticsPage from './pages/AnalyticsPage';
 import { Toaster } from './components/ui/sonner';
 
 function ProtectedRoute({ children }) {
@@ -53,6 +55,8 @@ function App() {
               <Route path="pipeline" element={<PipelinePage />} />
               <Route path="properties" element={<PropertiesPage />} />
               <Route path="tasks" element={<TasksPage />} />
+              <Route path="sequences" element={<SequencesPage />} />
+              <Route path="analytics" element={<AnalyticsPage />} />
               <Route path="calendar" element={<CalendarPage />} />
               <Route path="templates" element={<TemplatesPage />} />
               <Route path="settings" element={<SettingsPage />} />
