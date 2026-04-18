@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 
 # Test configuration
-BASE_URL = "https://propflow-crm-1.preview.emergentagent.com/api"
+BASE_URL = "https://drip-sequences.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@propflow.com"
 ADMIN_PASSWORD = "admin123"
 
