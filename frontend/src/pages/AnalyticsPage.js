@@ -15,10 +15,10 @@ export default function AnalyticsPage() {
     return (
       <div className="p-6 max-w-7xl mx-auto">
         <div className="animate-pulse space-y-4">
-          <div className="h-8 bg-slate-200 rounded w-1/4"></div>
+          <div className="h-8 bg-slate-200 dark:bg-slate-600 rounded w-1/4"></div>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             {[1, 2, 3, 4].map((i) => (
-              <div key={i} className="h-32 bg-slate-200 rounded"></div>
+              <div key={i} className="h-32 bg-slate-200 dark:bg-slate-600 rounded"></div>
             ))}
           </div>
         </div>
@@ -50,46 +50,46 @@ export default function AnalyticsPage() {
   return (
     <div className="p-6 max-w-7xl mx-auto">
       <div className="mb-6">
-        <h1 className="text-3xl font-bold text-slate-900">Analytics & Reporting</h1>
-        <p className="text-slate-600 mt-1">Track performance, conversions, and pipeline health</p>
+        <h1 className="text-3xl font-bold text-slate-900 dark:text-slate-100">Analytics & Reporting</h1>
+        <p className="text-slate-600 dark:text-slate-400 dark:text-slate-500 mt-1">Track performance, conversions, and pipeline health</p>
       </div>
 
       {/* Key Metrics */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-slate-600">Total Deals</CardTitle>
-            <TrendingUp className="w-4 h-4 text-slate-500" />
+            <CardTitle className="text-sm font-medium text-slate-600 dark:text-slate-400 dark:text-slate-500">Total Deals</CardTitle>
+            <TrendingUp className="w-4 h-4 text-slate-500 dark:text-slate-400 dark:text-slate-500" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-slate-900">{report.total_deals || 0}</div>
+            <div className="text-2xl font-bold text-slate-900 dark:text-slate-100">{report.total_deals || 0}</div>
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-slate-600">Won Deals</CardTitle>
+            <CardTitle className="text-sm font-medium text-slate-600 dark:text-slate-400 dark:text-slate-500">Won Deals</CardTitle>
             <CheckCircle className="w-4 h-4 text-green-600" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-slate-900">{report.won_deals || 0}</div>
+            <div className="text-2xl font-bold text-slate-900 dark:text-slate-100">{report.won_deals || 0}</div>
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-slate-600">Win Rate</CardTitle>
-            <Activity className="w-4 h-4 text-blue-600" />
+            <CardTitle className="text-sm font-medium text-slate-600 dark:text-slate-400 dark:text-slate-500">Win Rate</CardTitle>
+            <Activity className="w-4 h-4 text-blue-600 dark:text-blue-400" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-slate-900">{report.win_rate || 0}%</div>
+            <div className="text-2xl font-bold text-slate-900 dark:text-slate-100">{report.win_rate || 0}%</div>
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-slate-600">Avg Deal Value</CardTitle>
+            <CardTitle className="text-sm font-medium text-slate-600 dark:text-slate-400 dark:text-slate-500">Avg Deal Value</CardTitle>
             <DollarSign className="w-4 h-4 text-green-600" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-slate-900">${(report.avg_deal_value || 0).toLocaleString()}</div>
+            <div className="text-2xl font-bold text-slate-900 dark:text-slate-100">${(report.avg_deal_value || 0).toLocaleString()}</div>
           </CardContent>
         </Card>
       </div>

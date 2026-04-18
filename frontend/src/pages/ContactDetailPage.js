@@ -129,37 +129,37 @@ export default function ContactDetailPage() {
     }
   };
 
-  if (loading) return <div className="p-6"><div className="animate-pulse space-y-4"><div className="h-8 bg-slate-200 rounded w-48" /><div className="h-40 bg-slate-200 rounded-lg" /></div></div>;
+  if (loading) return <div className="p-6"><div className="animate-pulse space-y-4"><div className="h-8 bg-slate-200 dark:bg-slate-600 rounded w-48" /><div className="h-40 bg-slate-200 dark:bg-slate-600 rounded-lg" /></div></div>;
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-[1600px] mx-auto space-y-6" data-testid="contact-detail-page">
-      <button onClick={() => navigate('/contacts')} className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-800 transition-colors" data-testid="back-to-contacts">
+      <button onClick={() => navigate('/contacts')} className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400 dark:text-slate-500 hover:text-slate-800 dark:text-slate-200 transition-colors" data-testid="back-to-contacts">
         <ArrowLeft className="w-4 h-4" /> Back to Contacts
       </button>
 
       {/* Header */}
-      <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5 sm:p-6">
+      <div className="bg-white border border-slate-200 dark:border-slate-700 rounded-lg shadow-sm p-5 sm:p-6">
         <div className="flex items-start justify-between flex-wrap gap-4">
           <div className="flex items-start gap-4">
-            <div className="w-14 h-14 rounded-full bg-slate-200 flex items-center justify-center flex-shrink-0">
-              <span className="text-xl font-bold text-slate-600">{contact.name?.charAt(0)?.toUpperCase()}</span>
+            <div className="w-14 h-14 rounded-full bg-slate-200 dark:bg-slate-600 flex items-center justify-center flex-shrink-0">
+              <span className="text-xl font-bold text-slate-600 dark:text-slate-400 dark:text-slate-500">{contact.name?.charAt(0)?.toUpperCase()}</span>
             </div>
             <div>
-              <h1 className="font-heading text-2xl font-bold text-slate-900">{contact.name}</h1>
-              {contact.company && <p className="text-sm text-slate-500 flex items-center gap-1 mt-0.5"><Building className="w-3.5 h-3.5" /> {contact.company}</p>}
+              <h1 className="font-heading text-2xl font-bold text-slate-900 dark:text-slate-100">{contact.name}</h1>
+              {contact.company && <p className="text-sm text-slate-500 dark:text-slate-400 dark:text-slate-500 flex items-center gap-1 mt-0.5"><Building className="w-3.5 h-3.5" /> {contact.company}</p>}
               <div className="flex items-center gap-4 mt-2 flex-wrap">
-                {contact.email && <span className="text-sm text-slate-600 flex items-center gap-1"><Mail className="w-3.5 h-3.5" /> {contact.email}</span>}
-                {contact.phone && <span className="text-sm text-slate-600 flex items-center gap-1"><Phone className="w-3.5 h-3.5" /> {contact.phone}</span>}
+                {contact.email && <span className="text-sm text-slate-600 dark:text-slate-400 dark:text-slate-500 flex items-center gap-1"><Mail className="w-3.5 h-3.5" /> {contact.email}</span>}
+                {contact.phone && <span className="text-sm text-slate-600 dark:text-slate-400 dark:text-slate-500 flex items-center gap-1"><Phone className="w-3.5 h-3.5" /> {contact.phone}</span>}
               </div>
               <div className="flex items-center gap-2 mt-3 flex-wrap">
                 <Badge variant="outline">{TYPE_LABELS[contact.property_type] || contact.property_type}</Badge>
                 <Badge variant="secondary">{contact.source}</Badge>
-                {contact.tags?.map(t => <Badge key={t} className="bg-slate-100 text-slate-700"><Tag className="w-3 h-3 mr-1" />{t}</Badge>)}
+                {contact.tags?.map(t => <Badge key={t} className="bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300"><Tag className="w-3 h-3 mr-1" />{t}</Badge>)}
               </div>
             </div>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            <div className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-semibold ${contact.lead_score >= 70 ? 'bg-green-100 text-green-800' : contact.lead_score >= 40 ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-600'}`}>
+            <div className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-semibold ${contact.lead_score >= 70 ? 'bg-green-100 text-green-800 dark:text-green-400' : contact.lead_score >= 40 ? 'bg-amber-100 text-amber-800 dark:text-amber-400' : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400 dark:text-slate-500'}`}>
               Score: {contact.lead_score || 0}/100
             </div>
             <Button variant="outline" size="sm" onClick={handleScore} disabled={scoreLoading} className="gap-1.5" data-testid="ai-score-button">
@@ -180,7 +180,7 @@ export default function ContactDetailPage() {
             )}
           </div>
         </div>
-        {contact.notes && <p className="text-sm text-slate-600 mt-4 border-t border-slate-100 pt-4">{contact.notes}</p>}
+        {contact.notes && <p className="text-sm text-slate-600 dark:text-slate-400 dark:text-slate-500 mt-4 border-t border-slate-100 dark:border-slate-700 pt-4">{contact.notes}</p>}
       </div>
 
       <Tabs defaultValue="activities" className="space-y-4">
@@ -190,9 +190,9 @@ export default function ContactDetailPage() {
         </TabsList>
 
         <TabsContent value="activities">
-          <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5">
+          <div className="bg-white border border-slate-200 dark:border-slate-700 rounded-lg shadow-sm p-5">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-medium text-slate-800">Activity Timeline</h3>
+              <h3 className="text-lg font-medium text-slate-800 dark:text-slate-200">Activity Timeline</h3>
               <Dialog open={showActivity} onOpenChange={setShowActivity}>
                 <DialogTrigger asChild>
                   <Button variant="outline" size="sm" className="gap-1.5" data-testid="add-activity-button"><Plus className="w-3.5 h-3.5" /> Log Activity</Button>
@@ -204,19 +204,19 @@ export default function ContactDetailPage() {
               </Dialog>
             </div>
             {activities.length === 0 ? (
-              <p className="text-sm text-slate-400 py-8 text-center">No activities logged yet.</p>
+              <p className="text-sm text-slate-400 dark:text-slate-500 py-8 text-center">No activities logged yet.</p>
             ) : (
               <div className="space-y-3">
                 {activities.map((a, i) => {
                   const Icon = ACTIVITY_ICONS[a.activity_type] || MessageSquare;
                   return (
-                    <div key={i} className="flex items-start gap-3 py-3 border-b border-slate-100 last:border-0" data-testid={`activity-item-${i}`}>
-                      <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center flex-shrink-0">
-                        <Icon className="w-4 h-4 text-slate-500" />
+                    <div key={i} className="flex items-start gap-3 py-3 border-b border-slate-100 dark:border-slate-700 last:border-0" data-testid={`activity-item-${i}`}>
+                      <div className="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-700 flex items-center justify-center flex-shrink-0">
+                        <Icon className="w-4 h-4 text-slate-500 dark:text-slate-400 dark:text-slate-500" />
                       </div>
                       <div className="flex-1">
-                        <p className="text-sm text-slate-700">{a.description}</p>
-                        <p className="text-xs text-slate-400 mt-0.5">{a.activity_type} &middot; {new Date(a.created_at).toLocaleString()}</p>
+                        <p className="text-sm text-slate-700 dark:text-slate-300">{a.description}</p>
+                        <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">{a.activity_type} &middot; {new Date(a.created_at).toLocaleString()}</p>
                       </div>
                     </div>
                   );
@@ -227,19 +227,19 @@ export default function ContactDetailPage() {
         </TabsContent>
 
         <TabsContent value="deals">
-          <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5">
-            <h3 className="text-lg font-medium text-slate-800 mb-4">Associated Deals</h3>
+          <div className="bg-white border border-slate-200 dark:border-slate-700 rounded-lg shadow-sm p-5">
+            <h3 className="text-lg font-medium text-slate-800 dark:text-slate-200 mb-4">Associated Deals</h3>
             {deals.length === 0 ? (
-              <p className="text-sm text-slate-400 py-8 text-center">No deals linked to this contact.</p>
+              <p className="text-sm text-slate-400 dark:text-slate-500 py-8 text-center">No deals linked to this contact.</p>
             ) : (
               <div className="space-y-3">
                 {deals.map(d => (
-                  <div key={d.id} className="flex items-center justify-between p-3 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors cursor-pointer" onClick={() => navigate('/pipeline')} data-testid={`deal-link-${d.id}`}>
+                  <div key={d.id} className="flex items-center justify-between p-3 border border-slate-200 dark:border-slate-700 rounded-lg hover:bg-slate-50 dark:bg-slate-700/50 transition-colors cursor-pointer" onClick={() => navigate('/pipeline')} data-testid={`deal-link-${d.id}`}>
                     <div>
-                      <p className="text-sm font-medium text-slate-900">{d.title}</p>
-                      <p className="text-xs text-slate-500 mt-0.5">{TYPE_LABELS[d.pipeline_type]} &middot; {d.stage}</p>
+                      <p className="text-sm font-medium text-slate-900 dark:text-slate-100">{d.title}</p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500 mt-0.5">{TYPE_LABELS[d.pipeline_type]} &middot; {d.stage}</p>
                     </div>
-                    {d.value > 0 && <span className="text-sm font-semibold text-slate-900">${d.value.toLocaleString()}</span>}
+                    {d.value > 0 && <span className="text-sm font-semibold text-slate-900 dark:text-slate-100">${d.value.toLocaleString()}</span>}
                   </div>
                 ))}
               </div>
@@ -255,9 +255,9 @@ export default function ContactDetailPage() {
           <div className="space-y-3">
             {emailTemplates.length > 0 && (
               <div>
-                <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Use Template</Label>
+                <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Use Template</Label>
                 <Select onValueChange={v => { const t = emailTemplates.find(t => t.id === v); if (t) applyTemplate(t, 'email'); }}>
-                  <SelectTrigger className="bg-white" data-testid="email-template-select"><SelectValue placeholder="Select a template..." /></SelectTrigger>
+                  <SelectTrigger className="bg-white dark:bg-slate-800" data-testid="email-template-select"><SelectValue placeholder="Select a template..." /></SelectTrigger>
                   <SelectContent>
                     {emailTemplates.map(t => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}
                   </SelectContent>
@@ -265,16 +265,16 @@ export default function ContactDetailPage() {
               </div>
             )}
             <div>
-              <Label className="text-sm font-medium text-slate-700 mb-1.5 block">To</Label>
-              <Input value={contact?.email || ''} disabled className="bg-slate-50" />
+              <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">To</Label>
+              <Input value={contact?.email || ''} disabled className="bg-slate-50 dark:bg-slate-700/50" />
             </div>
             <div>
-              <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Subject</Label>
-              <Input value={emailForm.subject} onChange={e => setEmailForm({...emailForm, subject: e.target.value})} placeholder="Email subject" className="bg-white border-slate-300" data-testid="email-subject-input" />
+              <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Subject</Label>
+              <Input value={emailForm.subject} onChange={e => setEmailForm({...emailForm, subject: e.target.value})} placeholder="Email subject" className="bg-white border-slate-300 dark:border-slate-600" data-testid="email-subject-input" />
             </div>
             <div>
-              <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Body</Label>
-              <Textarea value={emailForm.body} onChange={e => setEmailForm({...emailForm, body: e.target.value})} rows={8} className="bg-white border-slate-300" data-testid="email-body-input" />
+              <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Body</Label>
+              <Textarea value={emailForm.body} onChange={e => setEmailForm({...emailForm, body: e.target.value})} rows={8} className="bg-white border-slate-300 dark:border-slate-600" data-testid="email-body-input" />
             </div>
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={() => setShowSendEmail(false)}>Cancel</Button>
@@ -293,9 +293,9 @@ export default function ContactDetailPage() {
           <div className="space-y-3">
             {smsTemplates.length > 0 && (
               <div>
-                <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Use Template</Label>
+                <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Use Template</Label>
                 <Select onValueChange={v => { const t = smsTemplates.find(t => t.id === v); if (t) applyTemplate(t, 'sms'); }}>
-                  <SelectTrigger className="bg-white" data-testid="sms-template-select"><SelectValue placeholder="Select a template..." /></SelectTrigger>
+                  <SelectTrigger className="bg-white dark:bg-slate-800" data-testid="sms-template-select"><SelectValue placeholder="Select a template..." /></SelectTrigger>
                   <SelectContent>
                     {smsTemplates.map(t => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}
                   </SelectContent>
@@ -303,13 +303,13 @@ export default function ContactDetailPage() {
               </div>
             )}
             <div>
-              <Label className="text-sm font-medium text-slate-700 mb-1.5 block">To</Label>
-              <Input value={contact?.phone || ''} disabled className="bg-slate-50" />
+              <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">To</Label>
+              <Input value={contact?.phone || ''} disabled className="bg-slate-50 dark:bg-slate-700/50" />
             </div>
             <div>
-              <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Message</Label>
-              <Textarea value={smsForm.message} onChange={e => setSmsForm({message: e.target.value})} rows={4} placeholder="Type your message..." className="bg-white border-slate-300" data-testid="sms-message-input" />
-              <p className="text-xs text-slate-400 mt-1">{smsForm.message.length}/160 characters</p>
+              <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Message</Label>
+              <Textarea value={smsForm.message} onChange={e => setSmsForm({message: e.target.value})} rows={4} placeholder="Type your message..." className="bg-white border-slate-300 dark:border-slate-600" data-testid="sms-message-input" />
+              <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">{smsForm.message.length}/160 characters</p>
             </div>
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={() => setShowSendSMS(false)}>Cancel</Button>
@@ -339,9 +339,9 @@ function ActivityForm({ onSubmit }) {
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <div>
-        <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Type</Label>
+        <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Type</Label>
         <Select value={type} onValueChange={setType}>
-          <SelectTrigger className="bg-white" data-testid="activity-type-select"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="bg-white dark:bg-slate-800" data-testid="activity-type-select"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="call">Call</SelectItem>
             <SelectItem value="email">Email</SelectItem>
@@ -351,8 +351,8 @@ function ActivityForm({ onSubmit }) {
         </Select>
       </div>
       <div>
-        <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Description</Label>
-        <Textarea value={desc} onChange={e => setDesc(e.target.value)} required rows={3} className="bg-white border-slate-300" data-testid="activity-description-input" />
+        <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Description</Label>
+        <Textarea value={desc} onChange={e => setDesc(e.target.value)} required rows={3} className="bg-white border-slate-300 dark:border-slate-600" data-testid="activity-description-input" />
       </div>
       <Button type="submit" disabled={submitting} className="w-full bg-slate-900 text-white hover:bg-slate-800" data-testid="activity-form-submit">
         {submitting ? 'Logging...' : 'Log Activity'}

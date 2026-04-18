@@ -13,9 +13,9 @@ import { Badge } from '../components/ui/badge';
 import { Checkbox } from '../components/ui/checkbox';
 
 const PRIORITY_STYLES = {
-  high: 'bg-red-100 text-red-800 border-red-200',
-  medium: 'bg-amber-100 text-amber-800 border-amber-200',
-  low: 'bg-slate-100 text-slate-600 border-slate-200',
+  high: 'bg-red-100 text-red-800 border-red-200 dark:border-red-800',
+  medium: 'bg-amber-100 text-amber-800 dark:text-amber-400 border-amber-200',
+  low: 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400 dark:text-slate-500 border-slate-200 dark:border-slate-700',
 };
 
 export default function TasksPage() {
@@ -51,14 +51,14 @@ export default function TasksPage() {
   const todayTasks = tasks.filter(t => t.due_date?.startsWith(today) && !t.completed);
   const overdueTasks = tasks.filter(t => isOverdue(t));
 
-  if (error) return <div className="p-4 sm:p-6 lg:p-8"><div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">Failed to load tasks. Please try again.</div></div>;
+  if (error) return <div className="p-4 sm:p-6 lg:p-8"><div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 px-4 py-3 rounded-lg text-sm">Failed to load tasks. Please try again.</div></div>;
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-[1600px] mx-auto space-y-5" data-testid="tasks-page">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="font-heading text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">Tasks</h1>
-          <p className="text-sm text-slate-500 mt-1">{tasks.filter(t => !t.completed).length} active tasks</p>
+          <h1 className="font-heading text-2xl sm:text-3xl font-bold text-slate-900 dark:text-slate-100 tracking-tight">Tasks</h1>
+          <p className="text-sm text-slate-500 dark:text-slate-400 dark:text-slate-500 mt-1">{tasks.filter(t => !t.completed).length} active tasks</p>
         </div>
         <Dialog open={showAdd} onOpenChange={setShowAdd}>
           <DialogTrigger asChild>
@@ -76,12 +76,12 @@ export default function TasksPage() {
       {/* Quick stats */}
       <div className="flex gap-3 flex-wrap">
         {overdueTasks.length > 0 && (
-          <div className="flex items-center gap-2 px-3 py-1.5 bg-red-50 border border-red-200 rounded-md text-sm text-red-700" data-testid="overdue-tasks-badge">
+          <div className="flex items-center gap-2 px-3 py-1.5 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md text-sm text-red-700 dark:text-red-400" data-testid="overdue-tasks-badge">
             <AlertTriangle className="w-4 h-4" /> {overdueTasks.length} overdue
           </div>
         )}
         {todayTasks.length > 0 && (
-          <div className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 border border-blue-200 rounded-md text-sm text-blue-700" data-testid="today-tasks-badge">
+          <div className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 rounded-md text-sm text-blue-700 dark:text-blue-400" data-testid="today-tasks-badge">
             <Clock className="w-4 h-4" /> {todayTasks.length} due today
           </div>
         )}
@@ -98,37 +98,37 @@ export default function TasksPage() {
 
       {/* Task List */}
       {loading ? (
-        <div className="space-y-2">{[1,2,3].map(i => <div key={i} className="h-16 bg-slate-100 rounded-lg animate-pulse" />)}</div>
+        <div className="space-y-2">{[1,2,3].map(i => <div key={i} className="h-16 bg-slate-100 dark:bg-slate-700 rounded-lg animate-pulse" />)}</div>
       ) : tasks.length === 0 ? (
-        <div className="bg-white border border-slate-200 rounded-lg p-12 text-center" data-testid="tasks-empty-state">
+        <div className="bg-white border border-slate-200 dark:border-slate-700 rounded-lg p-12 text-center" data-testid="tasks-empty-state">
           <CheckCircle2 className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-          <p className="text-slate-500 text-sm mb-3">{filter === 'all' ? 'No tasks yet.' : `No ${filter} tasks.`}</p>
+          <p className="text-slate-500 dark:text-slate-400 dark:text-slate-500 text-sm mb-3">{filter === 'all' ? 'No tasks yet.' : `No ${filter} tasks.`}</p>
           <Button onClick={() => setShowAdd(true)} className="bg-slate-900 text-white hover:bg-slate-800 gap-2"><Plus className="w-4 h-4" /> Add Task</Button>
         </div>
       ) : (
         <div className="space-y-2" data-testid="tasks-list">
           {tasks.map(task => (
-            <div key={task.id} className={`bg-white border rounded-lg p-4 flex items-start gap-3 hover:shadow-sm transition-shadow ${isOverdue(task) ? 'border-red-200 bg-red-50/30' : 'border-slate-200'} ${task.completed ? 'opacity-60' : ''}`} data-testid={`task-item-${task.id}`}>
+            <div key={task.id} className={`bg-white border rounded-lg p-4 flex items-start gap-3 hover:shadow-sm transition-shadow ${isOverdue(task) ? 'border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20/30' : 'border-slate-200 dark:border-slate-700'} ${task.completed ? 'opacity-60' : ''}`} data-testid={`task-item-${task.id}`}>
               <Checkbox checked={task.completed} onCheckedChange={() => toggleComplete(task)} className="mt-0.5" data-testid={`task-checkbox-${task.id}`} />
               <div className="flex-1 min-w-0">
                 <div className="flex items-start justify-between gap-2">
-                  <p className={`text-sm font-medium ${task.completed ? 'line-through text-slate-400' : 'text-slate-900'}`}>{task.title}</p>
+                  <p className={`text-sm font-medium ${task.completed ? 'line-through text-slate-400 dark:text-slate-500' : 'text-slate-900 dark:text-slate-100'}`}>{task.title}</p>
                   <div className="flex items-center gap-2 flex-shrink-0">
                     <Badge className={`text-xs border ${PRIORITY_STYLES[task.priority] || PRIORITY_STYLES.medium}`}>{task.priority}</Badge>
-                    <button onClick={() => handleDelete(task.id)} className="p-1 hover:bg-red-50 rounded text-slate-400 hover:text-red-500 transition-colors" data-testid={`delete-task-${task.id}`}>
+                    <button onClick={() => handleDelete(task.id)} className="p-1 hover:bg-red-50 dark:bg-red-900/20 rounded text-slate-400 dark:text-slate-500 hover:text-red-500 transition-colors" data-testid={`delete-task-${task.id}`}>
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 </div>
-                {task.description && <p className="text-xs text-slate-500 mt-0.5">{task.description}</p>}
+                {task.description && <p className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500 mt-0.5">{task.description}</p>}
                 <div className="flex items-center gap-3 mt-2 flex-wrap">
                   {task.due_date && (
-                    <span className={`text-xs flex items-center gap-1 ${isOverdue(task) ? 'text-red-600 font-semibold' : 'text-slate-500'}`}>
+                    <span className={`text-xs flex items-center gap-1 ${isOverdue(task) ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-slate-500 dark:text-slate-400 dark:text-slate-500'}`}>
                       <Calendar className="w-3 h-3" /> {new Date(task.due_date).toLocaleDateString()}
                     </span>
                   )}
-                  {task.contact_id && <span className="text-xs text-slate-500">{getContactName(task.contact_id)}</span>}
-                  {task.deal_id && <span className="text-xs text-slate-500">{getDealTitle(task.deal_id)}</span>}
+                  {task.contact_id && <span className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500">{getContactName(task.contact_id)}</span>}
+                  {task.deal_id && <span className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500">{getDealTitle(task.deal_id)}</span>}
                 </div>
               </div>
             </div>
@@ -155,22 +155,22 @@ function TaskForm({ contacts, deals, onSubmit }) {
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <div>
-        <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Title *</Label>
-        <Input value={form.title} onChange={e => setForm({...form, title: e.target.value})} required className="bg-white border-slate-300" data-testid="task-form-title" />
+        <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Title *</Label>
+        <Input value={form.title} onChange={e => setForm({...form, title: e.target.value})} required className="bg-white border-slate-300 dark:border-slate-600" data-testid="task-form-title" />
       </div>
       <div>
-        <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Description</Label>
-        <Textarea value={form.description} onChange={e => setForm({...form, description: e.target.value})} rows={2} className="bg-white border-slate-300" />
+        <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Description</Label>
+        <Textarea value={form.description} onChange={e => setForm({...form, description: e.target.value})} rows={2} className="bg-white border-slate-300 dark:border-slate-600" />
       </div>
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Due Date</Label>
-          <Input type="date" value={form.due_date} onChange={e => setForm({...form, due_date: e.target.value})} className="bg-white border-slate-300" data-testid="task-form-due-date" />
+          <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Due Date</Label>
+          <Input type="date" value={form.due_date} onChange={e => setForm({...form, due_date: e.target.value})} className="bg-white border-slate-300 dark:border-slate-600" data-testid="task-form-due-date" />
         </div>
         <div>
-          <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Priority</Label>
+          <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Priority</Label>
           <Select value={form.priority} onValueChange={v => setForm({...form, priority: v})}>
-            <SelectTrigger className="bg-white" data-testid="task-form-priority"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="bg-white dark:bg-slate-800" data-testid="task-form-priority"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="high">High</SelectItem>
               <SelectItem value="medium">Medium</SelectItem>
@@ -181,9 +181,9 @@ function TaskForm({ contacts, deals, onSubmit }) {
       </div>
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Contact</Label>
+          <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Contact</Label>
           <Select value={form.contact_id} onValueChange={v => setForm({...form, contact_id: v})}>
-            <SelectTrigger className="bg-white"><SelectValue placeholder="Optional" /></SelectTrigger>
+            <SelectTrigger className="bg-white dark:bg-slate-800"><SelectValue placeholder="Optional" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="none">None</SelectItem>
               {contacts.map(c => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
@@ -191,9 +191,9 @@ function TaskForm({ contacts, deals, onSubmit }) {
           </Select>
         </div>
         <div>
-          <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Deal</Label>
+          <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Deal</Label>
           <Select value={form.deal_id} onValueChange={v => setForm({...form, deal_id: v})}>
-            <SelectTrigger className="bg-white"><SelectValue placeholder="Optional" /></SelectTrigger>
+            <SelectTrigger className="bg-white dark:bg-slate-800"><SelectValue placeholder="Optional" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="none">None</SelectItem>
               {deals.map(d => <SelectItem key={d.id} value={d.id}>{d.title}</SelectItem>)}

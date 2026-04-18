@@ -1,8 +1,5 @@
-from dotenv import load_dotenv
-from pathlib import Path
-
-ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+# ─── Config: Pydantic Settings (validates ALL env vars on startup) ───
+from config import settings
 
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, BackgroundTasks
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -35,37 +32,14 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# SECURITY: Environment & Settings Validation
-# Fail fast on startup if any critical environment variable is missing.
-# Optional vars (Brevo, Twilio, AI) log warnings but don't block startup.
-# ═══════════════════════════════════════════════════════════════════════════════
-REQUIRED_ENV_VARS = ["MONGO_URL", "DB_NAME", "JWT_SECRET", "ADMIN_EMAIL", "ADMIN_PASSWORD", "FRONTEND_URL"]
-OPTIONAL_ENV_VARS = {
-    "EMERGENT_LLM_KEY": "AI features (email drafting, lead scoring) will be unavailable",
-    "BREVO_API_KEY": "Email sending via Brevo will be unavailable",
-    "TWILIO_ACCOUNT_SID": "SMS sending via Twilio will be unavailable",
-    "TWILIO_AUTH_TOKEN": "SMS sending via Twilio will be unavailable",
-    "TWILIO_PHONE_NUMBER": "SMS sending via Twilio will be unavailable",
-}
-
-_missing_required = [v for v in REQUIRED_ENV_VARS if not os.environ.get(v)]
-if _missing_required:
-    raise RuntimeError(f"FATAL: Missing required environment variables: {', '.join(_missing_required)}. "
-                       "Server cannot start. Check your .env file.")
-for var, warning in OPTIONAL_ENV_VARS.items():
-    if not os.environ.get(var):
-        logger.warning(f"Optional env var {var} not set — {warning}")
-
-# ─── Environment detection ───
-# If FRONTEND_URL is https, we're in production (set secure cookies, HSTS, etc.)
-FRONTEND_URL = os.environ["FRONTEND_URL"]
-IS_PRODUCTION = FRONTEND_URL.startswith("https://")
+# ─── Validated settings (from config.py Pydantic model) ───
+FRONTEND_URL = settings.FRONTEND_URL
+IS_PRODUCTION = settings.is_production
 
 # ─── MongoDB connection ───
-mongo_url = os.environ['MONGO_URL']
+mongo_url = settings.MONGO_URL
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db = client[settings.DB_NAME]
 
 # ─── App & Router ───
 app = FastAPI(
@@ -92,8 +66,8 @@ app.state.limiter = limiter
 # - Rate limit: max 20 AI calls per user per hour
 # GPT-5.2 approximate pricing: $2/1M input tokens, $8/1M output tokens
 # ═══════════════════════════════════════════════════════════════════════════════
-MAX_AI_COST_PER_CALL = float(os.environ.get("MAX_AI_COST_PER_CALL", "0.05"))
-MAX_AI_CALLS_PER_HOUR = int(os.environ.get("MAX_AI_CALLS_PER_HOUR", "20"))
+MAX_AI_COST_PER_CALL = settings.MAX_AI_COST_PER_CALL
+MAX_AI_CALLS_PER_HOUR = settings.MAX_AI_CALLS_PER_HOUR
 AI_INPUT_COST_PER_TOKEN = 2.0 / 1_000_000   # $0.000002
 AI_OUTPUT_COST_PER_TOKEN = 8.0 / 1_000_000   # $0.000008
 AI_EST_OUTPUT_TOKENS = 800  # Conservative estimate for output
@@ -217,7 +191,7 @@ async def process_sequence_executions():
                     if contact.get("email"):
                         try:
                             # Use Brevo or fallback to logging
-                            brevo_key = os.environ.get("BREVO_API_KEY")
+                            brevo_key = settings.BREVO_API_KEY
                             if brevo_key:
                                 send_email_with_retry(brevo_key, contact["email"], subject, body)
                                 logger.info(f"Sequence email sent to {contact['email']}")
@@ -233,9 +207,9 @@ async def process_sequence_executions():
                     if contact.get("phone"):
                         try:
                             # Use Twilio or fallback to logging
-                            account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
-                            auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
-                            from_number = os.environ.get("TWILIO_PHONE_NUMBER")
+                            account_sid = settings.TWILIO_ACCOUNT_SID
+                            auth_token = settings.TWILIO_AUTH_TOKEN
+                            from_number = settings.TWILIO_PHONE_NUMBER
                             if account_sid and auth_token and from_number:
                                 send_sms_with_retry(account_sid, auth_token, from_number, contact["phone"], body)
                                 logger.info(f"Sequence SMS sent to {contact['phone']}")
@@ -357,7 +331,7 @@ def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
 def get_jwt_secret():
-    return os.environ["JWT_SECRET"]
+    return settings.JWT_SECRET
 
 def create_access_token(user_id: str, email: str) -> str:
     # SECURITY: Access token expires in 15 minutes (short-lived)
@@ -1124,7 +1098,13 @@ async def list_contacts(
     sort_order = 1 if order == "asc" else -1
     return await paginate(db.contacts, query, page=page, limit=limit, sort_field=sort, sort_order=sort_order)
 
-CONTACT_CSV_FIELDS = ["name", "email", "phone", "company", "source", "property_type", "tags", "notes", "lead_score"]
+CONTACT_CSV_FIELDS = [
+    "name", "email", "phone", "company", "source", "property_type",
+    "tags", "notes", "lead_score",
+    # Leasing-specific columns
+    "move_in_date", "budget_min", "budget_max", "bedrooms_needed",
+    "pet_type", "lease_term_months", "referral_source"
+]
 
 @api_router.get("/contacts/export")
 async def export_contacts_csv(user=Depends(get_any_auth_user)):
@@ -1143,6 +1123,13 @@ async def export_contacts_csv(user=Depends(get_any_auth_user)):
             "tags": ",".join(c.get("tags", [])),
             "notes": c.get("notes", ""),
             "lead_score": c.get("lead_score", 0),
+            "move_in_date": c.get("move_in_date", ""),
+            "budget_min": c.get("budget_min", ""),
+            "budget_max": c.get("budget_max", ""),
+            "bedrooms_needed": c.get("bedrooms_needed", ""),
+            "pet_type": c.get("pet_type", ""),
+            "lease_term_months": c.get("lease_term_months", ""),
+            "referral_source": c.get("referral_source", ""),
         })
     output.seek(0)
     return StreamingResponse(
@@ -1159,7 +1146,18 @@ async def get_contact_import_template():
     writer.writerow({
         "name": "Jane Smith", "email": "jane@example.com", "phone": "(555) 123-4567",
         "company": "Acme Realty", "source": "website", "property_type": "residential_lease",
-        "tags": "vip,relocating", "notes": "Looking for 2BR downtown", "lead_score": "0"
+        "tags": "vip,relocating", "notes": "Looking for 2BR downtown", "lead_score": "0",
+        "move_in_date": "2025-09-01", "budget_min": "1500", "budget_max": "2500",
+        "bedrooms_needed": "2", "pet_type": "dog", "lease_term_months": "12",
+        "referral_source": "zillow"
+    })
+    writer.writerow({
+        "name": "John Doe", "email": "john@example.com", "phone": "(555) 987-6543",
+        "company": "Tech Corp", "source": "referral", "property_type": "commercial_lease",
+        "tags": "high-priority", "notes": "Expanding office space", "lead_score": "50",
+        "move_in_date": "2025-10-15", "budget_min": "5000", "budget_max": "10000",
+        "bedrooms_needed": "", "pet_type": "", "lease_term_months": "36",
+        "referral_source": "agent-referral"
     })
     output.seek(0)
     return StreamingResponse(
@@ -1558,7 +1556,7 @@ Write a concise, professional email ready to send. Include subject line."""
     try:
         from emergentintegrations.llm.chat import LlmChat, UserMessage
         chat = LlmChat(
-            api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
+            api_key=settings.EMERGENT_LLM_KEY,
             session_id=f"email-draft-{data.contact_id}-{datetime.now(timezone.utc).isoformat()}",
             system_message=system_msg
         ).with_model("openai", "gpt-5.2")
@@ -1600,7 +1598,7 @@ Respond ONLY with a JSON object: {{"score": <number 0-100>, "reasoning": "<brief
     try:
         from emergentintegrations.llm.chat import LlmChat, UserMessage
         chat = LlmChat(
-            api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
+            api_key=settings.EMERGENT_LLM_KEY,
             session_id=f"lead-score-{data.contact_id}-{datetime.now(timezone.utc).isoformat()}",
             system_message=system_msg
         ).with_model("openai", "gpt-5.2")
@@ -1638,7 +1636,7 @@ async def ai_summarize(contact_id: str, user=Depends(get_any_auth_user)):
     try:
         from emergentintegrations.llm.chat import LlmChat, UserMessage
         chat = LlmChat(
-            api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
+            api_key=settings.EMERGENT_LLM_KEY,
             session_id=f"summary-{contact_id}-{datetime.now(timezone.utc).isoformat()}",
             system_message=system_msg
         ).with_model("openai", "gpt-5.2")
@@ -1697,6 +1695,7 @@ async def import_contacts(file: UploadFile = File(...), user=Depends(get_any_aut
     CHUNK_SIZE = 5000
     total_rows = len(rows)
     imported = 0
+    skipped = 0
     errors_list = []
     
     for chunk_start in range(0, total_rows, CHUNK_SIZE):
@@ -1704,42 +1703,66 @@ async def import_contacts(file: UploadFile = File(...), user=Depends(get_any_aut
         chunk = rows[chunk_start:chunk_end]
         
         for i, row in enumerate(chunk):
-            row_num = chunk_start + i + 1
+            row_num = chunk_start + i + 2  # +2 because row 1 is the header
             try:
                 name = str(row.get("name", "")).strip()
                 if not name:
-                    errors_list.append(f"Row {row_num}: Missing name")
+                    errors_list.append({"row": row_num, "field": "name", "reason": "Missing required field 'name'"})
+                    skipped += 1
+                    continue
+                email_val = str(row.get("email", "")).strip()
+                if email_val and "@" not in email_val:
+                    errors_list.append({"row": row_num, "field": "email", "reason": f"Invalid email format: '{email_val}'"})
+                    skipped += 1
                     continue
                 source_val = str(row.get("source", "csv_import")).strip()
                 if not source_val:
                     source_val = "csv_import"
                 prop_type = str(row.get("property_type", "residential_lease")).strip()
-                if prop_type not in ("residential_lease", "commercial_sale", "commercial_lease"):
+                if prop_type and prop_type not in ("residential_lease", "commercial_sale", "commercial_lease"):
+                    errors_list.append({"row": row_num, "field": "property_type", "reason": f"Invalid property_type '{prop_type}'. Must be: residential_lease, commercial_sale, or commercial_lease"})
                     prop_type = "residential_lease"
                 tags_raw = str(row.get("tags", "")).strip()
                 tags = [t.strip() for t in tags_raw.split(",") if t.strip()] if tags_raw else []
+                lead_score_raw = row.get("lead_score", 0) or 0
+                try:
+                    lead_score = int(lead_score_raw)
+                except (ValueError, TypeError):
+                    errors_list.append({"row": row_num, "field": "lead_score", "reason": f"Invalid lead_score '{lead_score_raw}', defaulting to 0"})
+                    lead_score = 0
                 doc = {
                     "name": name,
-                    "email": str(row.get("email", "")).strip(),
+                    "email": email_val,
                     "phone": str(row.get("phone", "")).strip(),
                     "company": str(row.get("company", "")).strip(),
                     "source": source_val,
                     "property_type": prop_type,
                     "tags": tags,
                     "notes": str(row.get("notes", "")).strip(),
-                    "lead_score": int(row.get("lead_score", 0) or 0),
+                    "lead_score": lead_score,
                     "user_id": user["_id"],
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
+                # Store leasing-specific optional fields if present
+                for extra_field in ("move_in_date", "budget_min", "budget_max", "bedrooms_needed", "pet_type", "lease_term_months", "referral_source"):
+                    val = str(row.get(extra_field, "")).strip()
+                    if val:
+                        doc[extra_field] = val
                 await db.contacts.insert_one(doc)
                 imported += 1
             except Exception as e:
-                errors_list.append(f"Row {row_num}: {str(e)}")
+                errors_list.append({"row": row_num, "field": "unknown", "reason": str(e)})
+                skipped += 1
         
         logger.info(f"Import progress: {chunk_end}/{total_rows} rows processed")
     
-    return {"imported": imported, "total_rows": total_rows, "errors": errors_list}
+    return {
+        "imported": imported,
+        "total_rows": total_rows,
+        "skipped": skipped,
+        "errors": errors_list,
+    }
 
 # ─── Message Templates ───
 @api_router.post("/templates")
@@ -1819,7 +1842,7 @@ Make it professional, warm, and action-oriented."""
     try:
         from emergentintegrations.llm.chat import LlmChat, UserMessage
         chat = LlmChat(
-            api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
+            api_key=settings.EMERGENT_LLM_KEY,
             session_id=f"template-gen-{datetime.now(timezone.utc).isoformat()}",
             system_message=system_msg
         ).with_model("openai", "gpt-5.2")
@@ -1844,9 +1867,9 @@ Make it professional, warm, and action-oriented."""
 # ─── Email Sending (Brevo) ───
 @api_router.post("/email/send")
 async def send_email_endpoint(data: SendEmailRequest, background_tasks: BackgroundTasks, user=Depends(get_any_auth_user)):
-    brevo_key = os.environ.get("BREVO_API_KEY", "")
-    sender_email = os.environ.get("SENDER_EMAIL", "")
-    sender_name = os.environ.get("SENDER_NAME", "PropFlow CRM")
+    brevo_key = settings.BREVO_API_KEY
+    sender_email = settings.SENDER_EMAIL
+    sender_name = settings.SENDER_NAME
     if not brevo_key or not sender_email:
         raise HTTPException(status_code=503, detail="Email service not configured. Add BREVO_API_KEY and SENDER_EMAIL to .env")
     try:
@@ -1877,9 +1900,9 @@ async def send_email_endpoint(data: SendEmailRequest, background_tasks: Backgrou
 # ─── SMS Sending (Twilio) with retry logic ───
 @api_router.post("/sms/send")
 async def send_sms_endpoint(data: SendSMSRequest, background_tasks: BackgroundTasks, user=Depends(get_any_auth_user)):
-    account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
-    auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
-    from_number = os.environ.get("TWILIO_PHONE_NUMBER", "")
+    account_sid = settings.TWILIO_ACCOUNT_SID
+    auth_token = settings.TWILIO_AUTH_TOKEN
+    from_number = settings.TWILIO_PHONE_NUMBER
     if not account_sid or not auth_token or not from_number:
         raise HTTPException(status_code=503, detail="SMS service not configured. Add TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_PHONE_NUMBER to .env")
     try:
@@ -2317,8 +2340,8 @@ async def startup():
     await create_mongodb_indexes()
 
     # Seed admin
-    admin_email = os.environ.get("ADMIN_EMAIL", "admin@propflow.com")
-    admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
+    admin_email = settings.ADMIN_EMAIL
+    admin_password = settings.ADMIN_PASSWORD
     existing = await db.users.find_one({"email": admin_email})
     if not existing:
         await db.users.insert_one({

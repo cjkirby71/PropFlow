@@ -28,12 +28,12 @@ export default function SettingsPage() {
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-[1600px] mx-auto space-y-6" data-testid="settings-page">
       <div>
-        <h1 className="font-heading text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">Settings</h1>
-        <p className="text-sm text-slate-500 mt-1">Manage API keys, team, webhooks, and integrations</p>
+        <h1 className="font-heading text-2xl sm:text-3xl font-bold text-slate-900 dark:text-slate-100 tracking-tight">Settings</h1>
+        <p className="text-sm text-slate-500 dark:text-slate-400 dark:text-slate-500 mt-1">Manage API keys, team, webhooks, and integrations</p>
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} data-testid="settings-tabs">
-        <TabsList className="bg-slate-100">
+        <TabsList className="bg-slate-100 dark:bg-slate-700">
           <TabsTrigger value="api-keys" className="data-[state=active]:bg-white gap-1.5"><Key className="w-3.5 h-3.5" /> API Keys</TabsTrigger>
           <TabsTrigger value="team" className="data-[state=active]:bg-white gap-1.5"><Users className="w-3.5 h-3.5" /> Team</TabsTrigger>
           <TabsTrigger value="webhooks" className="data-[state=active]:bg-white gap-1.5"><Webhook className="w-3.5 h-3.5" /> Webhooks</TabsTrigger>
@@ -72,11 +72,11 @@ function APIKeysSection() {
   };
 
   return (
-    <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5 sm:p-6" data-testid="api-keys-section">
+    <div className="bg-white border border-slate-200 dark:border-slate-700 rounded-lg shadow-sm p-5 sm:p-6" data-testid="api-keys-section">
       <div className="flex items-center justify-between mb-5">
         <div>
-          <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2"><Key className="w-5 h-5 text-slate-500" /> API Keys</h2>
-          <p className="text-sm text-slate-500 mt-0.5">Connect your MaxClaw agent or external integrations</p>
+          <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2"><Key className="w-5 h-5 text-slate-500 dark:text-slate-400 dark:text-slate-500" /> API Keys</h2>
+          <p className="text-sm text-slate-500 dark:text-slate-400 dark:text-slate-500 mt-0.5">Connect your MaxClaw agent or external integrations</p>
         </div>
         <Dialog open={showAdd} onOpenChange={o => { setShowAdd(o); if (!o) { setNewKey(''); setNewKeyName(''); } }}>
           <DialogTrigger asChild>
@@ -86,13 +86,13 @@ function APIKeysSection() {
             <DialogHeader><DialogTitle>Create API Key</DialogTitle></DialogHeader>
             {!newKey ? (
               <div className="space-y-4">
-                <div><Label className="text-sm font-medium text-slate-700 mb-1.5 block">Key Name</Label><Input value={newKeyName} onChange={e => setNewKeyName(e.target.value)} placeholder="e.g., MaxClaw Agent" className="bg-white border-slate-300" data-testid="api-key-name-input" /></div>
+                <div><Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Key Name</Label><Input value={newKeyName} onChange={e => setNewKeyName(e.target.value)} placeholder="e.g., MaxClaw Agent" className="bg-white border-slate-300 dark:border-slate-600" data-testid="api-key-name-input" /></div>
                 <Button onClick={handleCreate} className="w-full bg-slate-900 text-white hover:bg-slate-800" data-testid="generate-api-key-button">Generate Key</Button>
               </div>
             ) : (
               <div className="space-y-4">
-                <div className="bg-green-50 border border-green-200 rounded-md p-3"><p className="text-sm text-green-800 font-medium mb-2">Key created! Copy it now - you won't see it again.</p><div className="flex items-center gap-2"><code className="flex-1 text-xs bg-white border border-green-200 rounded px-2 py-1.5 font-mono break-all">{newKey}</code><Button size="sm" variant="outline" onClick={() => navigator.clipboard.writeText(newKey)} data-testid="copy-api-key-button"><Copy className="w-4 h-4" /></Button></div></div>
-                <div className="bg-slate-900 rounded-lg p-4"><p className="text-xs text-slate-400 mb-1 font-mono"># Usage with MaxClaw agent</p><code className="text-xs text-green-400 font-mono">X-API-Key: {newKey}</code></div>
+                <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md p-3"><p className="text-sm text-green-800 dark:text-green-400 font-medium mb-2">Key created! Copy it now - you won't see it again.</p><div className="flex items-center gap-2"><code className="flex-1 text-xs bg-white border border-green-200 dark:border-green-800 rounded px-2 py-1.5 font-mono break-all">{newKey}</code><Button size="sm" variant="outline" onClick={() => navigator.clipboard.writeText(newKey)} data-testid="copy-api-key-button"><Copy className="w-4 h-4" /></Button></div></div>
+                <div className="bg-slate-900 rounded-lg p-4"><p className="text-xs text-slate-400 dark:text-slate-500 mb-1 font-mono"># Usage with MaxClaw agent</p><code className="text-xs text-green-400 font-mono">X-API-Key: {newKey}</code></div>
                 <Button variant="outline" onClick={() => { setShowAdd(false); setNewKey(''); }} className="w-full">Done</Button>
               </div>
             )}
@@ -100,19 +100,19 @@ function APIKeysSection() {
         </Dialog>
       </div>
 
-      {loading ? <div className="space-y-2">{[1,2].map(i => <div key={i} className="h-16 bg-slate-100 rounded-lg animate-pulse" />)}</div> :
-        keys.length === 0 ? <div className="text-center py-8 border border-dashed border-slate-200 rounded-lg"><Key className="w-8 h-8 text-slate-300 mx-auto mb-2" /><p className="text-sm text-slate-500">No API keys yet.</p></div> :
+      {loading ? <div className="space-y-2">{[1,2].map(i => <div key={i} className="h-16 bg-slate-100 dark:bg-slate-700 rounded-lg animate-pulse" />)}</div> :
+        keys.length === 0 ? <div className="text-center py-8 border border-dashed border-slate-200 dark:border-slate-700 rounded-lg"><Key className="w-8 h-8 text-slate-300 mx-auto mb-2" /><p className="text-sm text-slate-500 dark:text-slate-400 dark:text-slate-500">No API keys yet.</p></div> :
         <div className="space-y-3" data-testid="api-keys-list">
           {keys.map((k, i) => (
-            <div key={i} className="flex items-center justify-between p-3 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors" data-testid={`api-key-item-${i}`}>
+            <div key={i} className="flex items-center justify-between p-3 border border-slate-200 dark:border-slate-700 rounded-lg hover:bg-slate-50 dark:bg-slate-700/50 transition-colors" data-testid={`api-key-item-${i}`}>
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2"><p className="text-sm font-medium text-slate-900">{k.name}</p><Badge variant={k.active ? 'default' : 'secondary'} className="text-xs">{k.active ? 'Active' : 'Inactive'}</Badge></div>
-                <div className="flex items-center gap-2 mt-1"><code className="text-xs text-slate-500 font-mono">{showKeys[i] ? k.full_key : k.key_preview}</code><button onClick={() => setShowKeys(p => ({...p, [i]: !p[i]}))} className="text-slate-400 hover:text-slate-600">{showKeys[i] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}</button></div>
-                <p className="text-xs text-slate-400 mt-0.5">Created {new Date(k.created_at).toLocaleDateString()}{k.last_used && ` · Last used ${new Date(k.last_used).toLocaleDateString()}`}</p>
+                <div className="flex items-center gap-2"><p className="text-sm font-medium text-slate-900 dark:text-slate-100">{k.name}</p><Badge variant={k.active ? 'default' : 'secondary'} className="text-xs">{k.active ? 'Active' : 'Inactive'}</Badge></div>
+                <div className="flex items-center gap-2 mt-1"><code className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500 font-mono">{showKeys[i] ? k.full_key : k.key_preview}</code><button onClick={() => setShowKeys(p => ({...p, [i]: !p[i]}))} className="text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:text-slate-400 dark:text-slate-500">{showKeys[i] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}</button></div>
+                <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">Created {new Date(k.created_at).toLocaleDateString()}{k.last_used && ` · Last used ${new Date(k.last_used).toLocaleDateString()}`}</p>
               </div>
               <div className="flex items-center gap-1">
                 <Button variant="ghost" size="sm" onClick={() => navigator.clipboard.writeText(k.full_key)}><Copy className="w-4 h-4" /></Button>
-                <Button variant="ghost" size="sm" onClick={() => handleDelete(k.key_preview)} className="text-red-500 hover:text-red-700 hover:bg-red-50"><Trash2 className="w-4 h-4" /></Button>
+                <Button variant="ghost" size="sm" onClick={() => handleDelete(k.key_preview)} className="text-red-500 hover:text-red-700 dark:text-red-400 hover:bg-red-50 dark:bg-red-900/20"><Trash2 className="w-4 h-4" /></Button>
               </div>
             </div>
           ))}
@@ -149,11 +149,11 @@ function TeamSection({ isAdmin }) {
   };
 
   return (
-    <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5 sm:p-6" data-testid="team-section">
+    <div className="bg-white border border-slate-200 dark:border-slate-700 rounded-lg shadow-sm p-5 sm:p-6" data-testid="team-section">
       <div className="flex items-center justify-between mb-5">
         <div>
-          <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2"><Users className="w-5 h-5 text-slate-500" /> Team Members</h2>
-          <p className="text-sm text-slate-500 mt-0.5">Manage your team and their roles</p>
+          <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2"><Users className="w-5 h-5 text-slate-500 dark:text-slate-400 dark:text-slate-500" /> Team Members</h2>
+          <p className="text-sm text-slate-500 dark:text-slate-400 dark:text-slate-500 mt-0.5">Manage your team and their roles</p>
         </div>
         {isAdmin && (
           <Dialog open={showInvite} onOpenChange={o => { setShowInvite(o); if (!o) { setInviteResult(null); setInviteForm({ email: '', name: '', role: 'agent' }); } }}>
@@ -164,12 +164,12 @@ function TeamSection({ isAdmin }) {
               <DialogHeader><DialogTitle>Invite Team Member</DialogTitle></DialogHeader>
               {!inviteResult ? (
                 <div className="space-y-4">
-                  <div><Label className="text-sm font-medium text-slate-700 mb-1.5 block">Name</Label><Input value={inviteForm.name} onChange={e => setInviteForm({...inviteForm, name: e.target.value})} placeholder="John Doe" className="bg-white border-slate-300" data-testid="invite-name-input" /></div>
-                  <div><Label className="text-sm font-medium text-slate-700 mb-1.5 block">Email</Label><Input type="email" value={inviteForm.email} onChange={e => setInviteForm({...inviteForm, email: e.target.value})} placeholder="john@company.com" className="bg-white border-slate-300" data-testid="invite-email-input" /></div>
+                  <div><Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Name</Label><Input value={inviteForm.name} onChange={e => setInviteForm({...inviteForm, name: e.target.value})} placeholder="John Doe" className="bg-white border-slate-300 dark:border-slate-600" data-testid="invite-name-input" /></div>
+                  <div><Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Email</Label><Input type="email" value={inviteForm.email} onChange={e => setInviteForm({...inviteForm, email: e.target.value})} placeholder="john@company.com" className="bg-white border-slate-300 dark:border-slate-600" data-testid="invite-email-input" /></div>
                   <div>
-                    <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Role</Label>
+                    <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Role</Label>
                     <Select value={inviteForm.role} onValueChange={v => setInviteForm({...inviteForm, role: v})}>
-                      <SelectTrigger className="bg-white" data-testid="invite-role-select"><SelectValue /></SelectTrigger>
+                      <SelectTrigger className="bg-white dark:bg-slate-800" data-testid="invite-role-select"><SelectValue /></SelectTrigger>
                       <SelectContent><SelectItem value="admin">Admin</SelectItem><SelectItem value="agent">Agent</SelectItem></SelectContent>
                     </Select>
                   </div>
@@ -177,11 +177,11 @@ function TeamSection({ isAdmin }) {
                 </div>
               ) : (
                 <div className="space-y-4">
-                  <div className="bg-green-50 border border-green-200 rounded-md p-3">
-                    <p className="text-sm text-green-800 font-medium mb-2">Member invited!</p>
-                    <p className="text-sm text-slate-700">Email: <strong>{inviteResult.email}</strong></p>
-                    <p className="text-sm text-slate-700">Temp Password: <code className="bg-white border rounded px-1.5 py-0.5 font-mono text-xs">{inviteResult.temp_password}</code></p>
-                    <p className="text-xs text-slate-500 mt-2">Share these credentials securely with the team member.</p>
+                  <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md p-3">
+                    <p className="text-sm text-green-800 dark:text-green-400 font-medium mb-2">Member invited!</p>
+                    <p className="text-sm text-slate-700 dark:text-slate-300">Email: <strong>{inviteResult.email}</strong></p>
+                    <p className="text-sm text-slate-700 dark:text-slate-300">Temp Password: <code className="bg-white border rounded px-1.5 py-0.5 font-mono text-xs">{inviteResult.temp_password}</code></p>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500 mt-2">Share these credentials securely with the team member.</p>
                   </div>
                   <Button variant="outline" onClick={() => { setShowInvite(false); setInviteResult(null); }} className="w-full">Done</Button>
                 </div>
@@ -191,15 +191,15 @@ function TeamSection({ isAdmin }) {
         )}
       </div>
 
-      {loading ? <div className="space-y-2">{[1,2].map(i => <div key={i} className="h-16 bg-slate-100 rounded-lg animate-pulse" />)}</div> :
+      {loading ? <div className="space-y-2">{[1,2].map(i => <div key={i} className="h-16 bg-slate-100 dark:bg-slate-700 rounded-lg animate-pulse" />)}</div> :
         <div className="space-y-3" data-testid="team-members-list">
           {members.map(m => (
-            <div key={m.id} className="flex items-center justify-between p-3 border border-slate-200 rounded-lg" data-testid={`team-member-${m.id}`}>
+            <div key={m.id} className="flex items-center justify-between p-3 border border-slate-200 dark:border-slate-700 rounded-lg" data-testid={`team-member-${m.id}`}>
               <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-full bg-slate-200 flex items-center justify-center"><span className="text-sm font-semibold text-slate-600">{m.name?.charAt(0)?.toUpperCase()}</span></div>
+                <div className="w-9 h-9 rounded-full bg-slate-200 dark:bg-slate-600 flex items-center justify-center"><span className="text-sm font-semibold text-slate-600 dark:text-slate-400 dark:text-slate-500">{m.name?.charAt(0)?.toUpperCase()}</span></div>
                 <div>
-                  <p className="text-sm font-medium text-slate-900">{m.name}</p>
-                  <p className="text-xs text-slate-500">{m.email}</p>
+                  <p className="text-sm font-medium text-slate-900 dark:text-slate-100">{m.name}</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500">{m.email}</p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
@@ -211,7 +211,7 @@ function TeamSection({ isAdmin }) {
                 ) : (
                   <Badge variant={m.role === 'admin' ? 'default' : 'secondary'} className="text-xs flex items-center gap-1"><Shield className="w-3 h-3" /> {m.role}</Badge>
                 )}
-                {isAdmin && <Button variant="ghost" size="sm" onClick={() => handleRemove(m.id)} className="text-red-500 hover:bg-red-50"><Trash2 className="w-4 h-4" /></Button>}
+                {isAdmin && <Button variant="ghost" size="sm" onClick={() => handleRemove(m.id)} className="text-red-500 hover:bg-red-50 dark:bg-red-900/20"><Trash2 className="w-4 h-4" /></Button>}
               </div>
             </div>
           ))}
@@ -257,11 +257,11 @@ function WebhooksSection() {
   };
 
   return (
-    <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5 sm:p-6" data-testid="webhooks-section">
+    <div className="bg-white border border-slate-200 dark:border-slate-700 rounded-lg shadow-sm p-5 sm:p-6" data-testid="webhooks-section">
       <div className="flex items-center justify-between mb-5">
         <div>
-          <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2"><Webhook className="w-5 h-5 text-slate-500" /> Webhooks</h2>
-          <p className="text-sm text-slate-500 mt-0.5">Get real-time notifications when events occur in your CRM</p>
+          <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2"><Webhook className="w-5 h-5 text-slate-500 dark:text-slate-400 dark:text-slate-500" /> Webhooks</h2>
+          <p className="text-sm text-slate-500 dark:text-slate-400 dark:text-slate-500 mt-0.5">Get real-time notifications when events occur in your CRM</p>
         </div>
         <Dialog open={showAdd} onOpenChange={setShowAdd}>
           <DialogTrigger asChild>
@@ -270,15 +270,15 @@ function WebhooksSection() {
           <DialogContent data-testid="create-webhook-dialog">
             <DialogHeader><DialogTitle>Create Webhook</DialogTitle></DialogHeader>
             <div className="space-y-4">
-              <div><Label className="text-sm font-medium text-slate-700 mb-1.5 block">Name</Label><Input value={form.name} onChange={e => setForm({...form, name: e.target.value})} placeholder="MaxClaw Notifications" className="bg-white border-slate-300" data-testid="webhook-name-input" /></div>
-              <div><Label className="text-sm font-medium text-slate-700 mb-1.5 block">URL</Label><Input value={form.url} onChange={e => setForm({...form, url: e.target.value})} placeholder="https://your-agent.com/webhook" className="bg-white border-slate-300" data-testid="webhook-url-input" /></div>
+              <div><Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Name</Label><Input value={form.name} onChange={e => setForm({...form, name: e.target.value})} placeholder="MaxClaw Notifications" className="bg-white border-slate-300 dark:border-slate-600" data-testid="webhook-name-input" /></div>
+              <div><Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">URL</Label><Input value={form.url} onChange={e => setForm({...form, url: e.target.value})} placeholder="https://your-agent.com/webhook" className="bg-white border-slate-300 dark:border-slate-600" data-testid="webhook-url-input" /></div>
               <div>
-                <Label className="text-sm font-medium text-slate-700 mb-2 block">Events</Label>
+                <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-2 block">Events</Label>
                 <div className="space-y-2">
                   {WEBHOOK_EVENTS.map(evt => (
                     <label key={evt.value} className="flex items-center gap-2 cursor-pointer">
                       <Checkbox checked={form.events.includes(evt.value)} onCheckedChange={() => toggleEvent(evt.value)} data-testid={`webhook-event-${evt.value}`} />
-                      <span className="text-sm text-slate-700">{evt.label}</span>
+                      <span className="text-sm text-slate-700 dark:text-slate-300">{evt.label}</span>
                     </label>
                   ))}
                 </div>
@@ -289,22 +289,22 @@ function WebhooksSection() {
         </Dialog>
       </div>
 
-      {loading ? <div className="space-y-2">{[1,2].map(i => <div key={i} className="h-16 bg-slate-100 rounded-lg animate-pulse" />)}</div> :
-        webhooks.length === 0 ? <div className="text-center py-8 border border-dashed border-slate-200 rounded-lg"><Webhook className="w-8 h-8 text-slate-300 mx-auto mb-2" /><p className="text-sm text-slate-500">No webhooks configured. Add one to get real-time notifications.</p></div> :
+      {loading ? <div className="space-y-2">{[1,2].map(i => <div key={i} className="h-16 bg-slate-100 dark:bg-slate-700 rounded-lg animate-pulse" />)}</div> :
+        webhooks.length === 0 ? <div className="text-center py-8 border border-dashed border-slate-200 dark:border-slate-700 rounded-lg"><Webhook className="w-8 h-8 text-slate-300 mx-auto mb-2" /><p className="text-sm text-slate-500 dark:text-slate-400 dark:text-slate-500">No webhooks configured. Add one to get real-time notifications.</p></div> :
         <div className="space-y-3" data-testid="webhooks-list">
           {webhooks.map(w => (
-            <div key={w.id} className="flex items-center justify-between p-3 border border-slate-200 rounded-lg" data-testid={`webhook-item-${w.id}`}>
+            <div key={w.id} className="flex items-center justify-between p-3 border border-slate-200 dark:border-slate-700 rounded-lg" data-testid={`webhook-item-${w.id}`}>
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2"><p className="text-sm font-medium text-slate-900">{w.name}</p><Badge variant={w.active ? 'default' : 'secondary'} className="text-xs">{w.active ? 'Active' : 'Paused'}</Badge></div>
-                <p className="text-xs text-slate-500 font-mono mt-0.5 truncate">{w.url}</p>
+                <div className="flex items-center gap-2"><p className="text-sm font-medium text-slate-900 dark:text-slate-100">{w.name}</p><Badge variant={w.active ? 'default' : 'secondary'} className="text-xs">{w.active ? 'Active' : 'Paused'}</Badge></div>
+                <p className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500 font-mono mt-0.5 truncate">{w.url}</p>
                 <div className="flex items-center gap-1 mt-1 flex-wrap">{w.events?.map(e => <Badge key={e} variant="outline" className="text-xs">{e}</Badge>)}</div>
-                {w.last_triggered && <p className="text-xs text-slate-400 mt-0.5">Last triggered: {new Date(w.last_triggered).toLocaleString()}</p>}
+                {w.last_triggered && <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">Last triggered: {new Date(w.last_triggered).toLocaleString()}</p>}
               </div>
               <div className="flex items-center gap-1 ml-3">
                 <Button variant="ghost" size="sm" onClick={() => handleToggle(w.id)} data-testid={`webhook-toggle-${w.id}`}>
-                  {w.active ? <ToggleRight className="w-5 h-5 text-green-500" /> : <ToggleLeft className="w-5 h-5 text-slate-400" />}
+                  {w.active ? <ToggleRight className="w-5 h-5 text-green-500" /> : <ToggleLeft className="w-5 h-5 text-slate-400 dark:text-slate-500" />}
                 </Button>
-                <Button variant="ghost" size="sm" onClick={() => handleDelete(w.id)} className="text-red-500 hover:bg-red-50"><Trash2 className="w-4 h-4" /></Button>
+                <Button variant="ghost" size="sm" onClick={() => handleDelete(w.id)} className="text-red-500 hover:bg-red-50 dark:bg-red-900/20"><Trash2 className="w-4 h-4" /></Button>
               </div>
             </div>
           ))}
@@ -336,15 +336,15 @@ function IntegrationsSection() {
   return (
     <div className="space-y-4" data-testid="integrations-section">
       {/* Round-Robin Assignment */}
-      <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5">
+      <div className="bg-white border border-slate-200 dark:border-slate-700 rounded-lg shadow-sm p-5">
         <div className="flex items-start justify-between">
           <div className="flex items-start gap-3">
             <div className="w-10 h-10 rounded-lg bg-purple-100 flex items-center justify-center flex-shrink-0">
               <Users className="w-5 h-5 text-purple-600" />
             </div>
             <div>
-              <h3 className="text-sm font-semibold text-slate-900">Round-Robin Lead Assignment</h3>
-              <p className="text-xs text-slate-500 mt-0.5">Automatically distribute new contacts and deals to agents with the fewest open deals</p>
+              <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Round-Robin Lead Assignment</h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500 mt-0.5">Automatically distribute new contacts and deals to agents with the fewest open deals</p>
             </div>
           </div>
           <Button
@@ -358,85 +358,85 @@ function IntegrationsSection() {
           </Button>
         </div>
         {autoAssign && (
-          <div className="mt-3 bg-green-50 border border-green-200 rounded-md p-3">
-            <p className="text-xs text-green-700">✓ Auto-assignment is active. New contacts and deals will be distributed fairly across your team.</p>
+          <div className="mt-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md p-3">
+            <p className="text-xs text-green-700 dark:text-green-400">✓ Auto-assignment is active. New contacts and deals will be distributed fairly across your team.</p>
           </div>
         )}
       </div>
 
       {/* Google Calendar Sync */}
-      <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5">
+      <div className="bg-white border border-slate-200 dark:border-slate-700 rounded-lg shadow-sm p-5">
         <div className="flex items-start justify-between">
           <div className="flex items-start gap-3">
             <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0">
-              <Globe className="w-5 h-5 text-blue-600" />
+              <Globe className="w-5 h-5 text-blue-600 dark:text-blue-400" />
             </div>
             <div>
-              <h3 className="text-sm font-semibold text-slate-900">Google Calendar Sync</h3>
-              <p className="text-xs text-slate-500 mt-0.5">Sync PropFlow tasks and activities with Google Calendar</p>
+              <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Google Calendar Sync</h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500 mt-0.5">Sync PropFlow tasks and activities with Google Calendar</p>
             </div>
           </div>
           <Badge variant="outline" className="text-xs border-amber-200 text-amber-700">Coming Soon</Badge>
         </div>
-        <div className="mt-3 bg-slate-50 border border-slate-200 rounded-md p-3">
-          <p className="text-xs text-slate-600">Full Google Calendar integration will be available soon. Requires Google OAuth credentials.</p>
+        <div className="mt-3 bg-slate-50 dark:bg-slate-700/50 border border-slate-200 dark:border-slate-700 rounded-md p-3">
+          <p className="text-xs text-slate-600 dark:text-slate-400 dark:text-slate-500">Full Google Calendar integration will be available soon. Requires Google OAuth credentials.</p>
         </div>
       </div>
 
       {/* Brevo */}
-      <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5">
+      <div className="bg-white border border-slate-200 dark:border-slate-700 rounded-lg shadow-sm p-5">
         <div className="flex items-start justify-between">
           <div className="flex items-start gap-3">
-            <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0"><Globe className="w-5 h-5 text-blue-600" /></div>
+            <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0"><Globe className="w-5 h-5 text-blue-600 dark:text-blue-400" /></div>
             <div>
-              <h3 className="text-sm font-semibold text-slate-900">Brevo Email</h3>
-              <p className="text-xs text-slate-500 mt-0.5">Send emails directly from PropFlow using your brokerage address (free: 300 emails/day)</p>
-              <p className="text-xs text-slate-400 mt-1">Sender: craig@respaceteam.com</p>
+              <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Brevo Email</h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500 mt-0.5">Send emails directly from PropFlow using your brokerage address (free: 300 emails/day)</p>
+              <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">Sender: craig@respaceteam.com</p>
             </div>
           </div>
           <Badge variant="outline" className="text-xs border-amber-200 text-amber-700">Add API Key</Badge>
         </div>
-        <div className="mt-3 bg-slate-50 border border-slate-200 rounded-md p-3">
-          <p className="text-xs text-slate-600">To enable: Add <code className="bg-white px-1 rounded text-xs font-mono">BREVO_API_KEY</code> in your backend .env file.</p>
-          <p className="text-xs text-slate-500 mt-1">Get your key at <a href="https://app.brevo.com/settings/keys/api" target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">brevo.com</a> (Settings &gt; SMTP & API &gt; API Keys)</p>
+        <div className="mt-3 bg-slate-50 dark:bg-slate-700/50 border border-slate-200 dark:border-slate-700 rounded-md p-3">
+          <p className="text-xs text-slate-600 dark:text-slate-400 dark:text-slate-500">To enable: Add <code className="bg-white px-1 rounded text-xs font-mono">BREVO_API_KEY</code> in your backend .env file.</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500 mt-1">Get your key at <a href="https://app.brevo.com/settings/keys/api" target="_blank" rel="noreferrer" className="text-blue-600 dark:text-blue-400 hover:underline">brevo.com</a> (Settings &gt; SMTP & API &gt; API Keys)</p>
         </div>
       </div>
 
       {/* Twilio */}
-      <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5">
+      <div className="bg-white border border-slate-200 dark:border-slate-700 rounded-lg shadow-sm p-5">
         <div className="flex items-start justify-between">
           <div className="flex items-start gap-3">
-            <div className="w-10 h-10 rounded-lg bg-red-100 flex items-center justify-center flex-shrink-0"><Globe className="w-5 h-5 text-red-600" /></div>
+            <div className="w-10 h-10 rounded-lg bg-red-100 flex items-center justify-center flex-shrink-0"><Globe className="w-5 h-5 text-red-600 dark:text-red-400" /></div>
             <div>
-              <h3 className="text-sm font-semibold text-slate-900">Twilio SMS</h3>
-              <p className="text-xs text-slate-500 mt-0.5">Send text messages to leads directly from contact pages</p>
+              <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Twilio SMS</h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500 mt-0.5">Send text messages to leads directly from contact pages</p>
             </div>
           </div>
           <Badge variant="outline" className="text-xs border-amber-200 text-amber-700">Add API Key</Badge>
         </div>
-        <div className="mt-3 bg-slate-50 border border-slate-200 rounded-md p-3">
-          <p className="text-xs text-slate-600">To enable: Add <code className="bg-white px-1 rounded text-xs font-mono">TWILIO_ACCOUNT_SID</code>, <code className="bg-white px-1 rounded text-xs font-mono">TWILIO_AUTH_TOKEN</code>, and <code className="bg-white px-1 rounded text-xs font-mono">TWILIO_PHONE_NUMBER</code> in your backend .env file.</p>
-          <p className="text-xs text-slate-500 mt-1">Get credentials at <a href="https://www.twilio.com/console" target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">twilio.com</a></p>
+        <div className="mt-3 bg-slate-50 dark:bg-slate-700/50 border border-slate-200 dark:border-slate-700 rounded-md p-3">
+          <p className="text-xs text-slate-600 dark:text-slate-400 dark:text-slate-500">To enable: Add <code className="bg-white px-1 rounded text-xs font-mono">TWILIO_ACCOUNT_SID</code>, <code className="bg-white px-1 rounded text-xs font-mono">TWILIO_AUTH_TOKEN</code>, and <code className="bg-white px-1 rounded text-xs font-mono">TWILIO_PHONE_NUMBER</code> in your backend .env file.</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500 mt-1">Get credentials at <a href="https://www.twilio.com/console" target="_blank" rel="noreferrer" className="text-blue-600 dark:text-blue-400 hover:underline">twilio.com</a></p>
         </div>
       </div>
 
       {/* AI */}
-      <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5">
+      <div className="bg-white border border-slate-200 dark:border-slate-700 rounded-lg shadow-sm p-5">
         <div className="flex items-start justify-between">
           <div className="flex items-start gap-3">
             <div className="w-10 h-10 rounded-lg bg-amber-100 flex items-center justify-center flex-shrink-0"><Globe className="w-5 h-5 text-amber-600" /></div>
             <div>
-              <h3 className="text-sm font-semibold text-slate-900">AI Features (OpenAI GPT-5.2)</h3>
-              <p className="text-xs text-slate-500 mt-0.5">AI email drafts, lead scoring, activity summaries</p>
+              <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">AI Features (OpenAI GPT-5.2)</h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500 mt-0.5">AI email drafts, lead scoring, activity summaries</p>
             </div>
           </div>
-          <Badge variant="default" className="text-xs bg-green-100 text-green-800 border-green-200">Connected</Badge>
+          <Badge variant="default" className="text-xs bg-green-100 text-green-800 dark:text-green-400 border-green-200 dark:border-green-800">Connected</Badge>
         </div>
       </div>
 
       {/* API Docs */}
-      <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5">
-        <h3 className="text-sm font-semibold text-slate-900 mb-3">API Reference</h3>
+      <div className="bg-white border border-slate-200 dark:border-slate-700 rounded-lg shadow-sm p-5">
+        <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-3">API Reference</h3>
         <div className="space-y-2">
           {[
             { method: 'POST', path: '/api/contacts', desc: 'Create contact' },
@@ -452,10 +452,10 @@ function IntegrationsSection() {
             { method: 'POST', path: '/api/ai/draft-email', desc: 'AI email draft' },
             { method: 'POST', path: '/api/ai/lead-score', desc: 'AI lead scoring' },
           ].map((ep, i) => (
-            <div key={i} className="flex items-center gap-3 py-1.5 border-b border-slate-100 last:border-0">
-              <Badge className={`text-xs font-mono w-14 justify-center ${ep.method === 'POST' ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800'}`}>{ep.method}</Badge>
-              <code className="text-xs text-slate-700 font-mono">{ep.path}</code>
-              <span className="text-xs text-slate-500 ml-auto">{ep.desc}</span>
+            <div key={i} className="flex items-center gap-3 py-1.5 border-b border-slate-100 dark:border-slate-700 last:border-0">
+              <Badge className={`text-xs font-mono w-14 justify-center ${ep.method === 'POST' ? 'bg-green-100 text-green-800 dark:text-green-400' : 'bg-blue-100 text-blue-800'}`}>{ep.method}</Badge>
+              <code className="text-xs text-slate-700 dark:text-slate-300 font-mono">{ep.path}</code>
+              <span className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500 ml-auto">{ep.desc}</span>
             </div>
           ))}
         </div>

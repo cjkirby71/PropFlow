@@ -117,8 +117,8 @@ export default function SequencesPage() {
     return (
       <div className="p-6 max-w-7xl mx-auto">
         <div className="animate-pulse space-y-4">
-          <div className="h-8 bg-slate-200 rounded w-1/4"></div>
-          <div className="h-32 bg-slate-200 rounded"></div>
+          <div className="h-8 bg-slate-200 dark:bg-slate-600 rounded w-1/4"></div>
+          <div className="h-32 bg-slate-200 dark:bg-slate-600 rounded"></div>
         </div>
       </div>
     );
@@ -130,8 +130,8 @@ export default function SequencesPage() {
     <div className="p-6 max-w-7xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-3xl font-bold text-slate-900">Drip Sequences</h1>
-          <p className="text-slate-600 mt-1">Automated email & SMS campaigns</p>
+          <h1 className="text-3xl font-bold text-slate-900 dark:text-slate-100">Drip Sequences</h1>
+          <p className="text-slate-600 dark:text-slate-400 dark:text-slate-500 mt-1">Automated email & SMS campaigns</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={(open) => {
           setDialogOpen(open);
@@ -207,7 +207,7 @@ export default function SequencesPage() {
                           size="sm"
                           onClick={() => removeStep(index)}
                         >
-                          <Trash2 className="w-4 h-4 text-red-600" />
+                          <Trash2 className="w-4 h-4 text-red-600 dark:text-red-400" />
                         </Button>
                       )}
                     </div>
@@ -256,7 +256,7 @@ export default function SequencesPage() {
                         rows={4}
                         required
                       />
-                      <p className="text-xs text-slate-500 mt-1">
+                      <p className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500 mt-1">
                         Variables: {'{{contact.name}}'}, {'{{contact.email}}'}
                       </p>
                     </div>
@@ -278,9 +278,9 @@ export default function SequencesPage() {
 
       {sequences.length === 0 ? (
         <Card className="p-12 text-center">
-          <Users className="w-12 h-12 text-slate-400 mx-auto mb-4" />
-          <h3 className="text-lg font-semibold text-slate-900 mb-2">No sequences yet</h3>
-          <p className="text-slate-600 mb-4">Create your first drip campaign to nurture leads automatically</p>
+          <Users className="w-12 h-12 text-slate-400 dark:text-slate-500 mx-auto mb-4" />
+          <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-2">No sequences yet</h3>
+          <p className="text-slate-600 dark:text-slate-400 dark:text-slate-500 mb-4">Create your first drip campaign to nurture leads automatically</p>
           <Button onClick={() => setDialogOpen(true)}>
             <Plus className="w-4 h-4 mr-2" />
             Create Your First Sequence
@@ -293,16 +293,16 @@ export default function SequencesPage() {
               <div className="flex items-start justify-between">
                 <div className="flex-1">
                   <div className="flex items-center gap-3 mb-2">
-                    <h3 className="text-lg font-semibold text-slate-900">{sequence.name}</h3>
+                    <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100">{sequence.name}</h3>
                     <Badge variant={sequence.active ? "default" : "secondary"}>
                       {sequence.active ? 'Active' : 'Inactive'}
                     </Badge>
                   </div>
-                  <p className="text-sm text-slate-600 mb-3">
+                  <p className="text-sm text-slate-600 dark:text-slate-400 dark:text-slate-500 mb-3">
                     Trigger: <span className="font-medium">{sequence.trigger.replace(/_/g, ' ')}</span>
                     {sequence.trigger_value && ` (${sequence.trigger_value})`}
                   </p>
-                  <div className="flex items-center gap-2 text-sm text-slate-600">
+                  <div className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400 dark:text-slate-500">
                     <span>{sequence.steps?.length || 0} steps</span>
                   </div>
                 </div>
@@ -332,7 +332,7 @@ export default function SequencesPage() {
                     }}
                     disabled={deleteMutation.isPending}
                   >
-                    <Trash2 className="w-4 h-4 text-red-600" />
+                    <Trash2 className="w-4 h-4 text-red-600 dark:text-red-400" />
                   </Button>
                 </div>
               </div>

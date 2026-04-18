@@ -1,9 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import api from '../lib/api';
 import { useContacts, useDeleteContact, useImportContacts } from '../hooks/useApi';
-import { Plus, Search, Phone, Mail, Building, Tag, MoreHorizontal, Sparkles, Trash2, Edit, Download, Upload, FileSpreadsheet } from 'lucide-react';
+import { Plus, Search, Phone, Mail, Building, Tag, MoreHorizontal, Sparkles, Trash2, Edit, Download, Upload, FileSpreadsheet, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog';
@@ -20,11 +20,12 @@ const PROPERTY_TYPES = [
 ];
 
 export default function ContactsPage() {
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [search, setSearch] = useState(searchParams.get('search') || '');
   const [filterType, setFilterType] = useState('');
   const [showAdd, setShowAdd] = useState(false);
   const [editContact, setEditContact] = useState(null);
+  const [importResult, setImportResult] = useState(null);
   const navigate = useNavigate();
 
   const { data: contacts = [], isLoading: loading, error } = useContacts(search, filterType);
@@ -33,6 +34,17 @@ export default function ContactsPage() {
   const queryClient = useQueryClient();
 
   const invalidateContacts = () => queryClient.invalidateQueries({ queryKey: ['contacts'] });
+
+  // Handle Ctrl+N shortcut: open add dialog when ?new=1
+  useEffect(() => {
+    if (searchParams.get('new') === '1') {
+      setShowAdd(true);
+      // Clean the URL param without re-render loop
+      const newParams = new URLSearchParams(searchParams);
+      newParams.delete('new');
+      setSearchParams(newParams, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
 
   const handleDelete = async (id) => {
     if (!window.confirm('Delete this contact?')) return;
@@ -79,23 +91,24 @@ export default function ContactsPage() {
     formData.append('file', file);
     importMutation.mutate(formData, {
       onSuccess: ({ data }) => {
-        alert(`Imported ${data.imported} of ${data.total_rows} contacts.${data.errors?.length ? `\n\nErrors:\n${data.errors.join('\n')}` : ''}`);
+        setImportResult(data);
+        invalidateContacts();
       },
       onError: (err) => {
-        alert('Import failed: ' + (err.response?.data?.detail || err.message));
+        setImportResult({ error: err.response?.data?.detail || err.message });
       },
     });
     e.target.value = '';
   };
 
-  if (error) return <div className="p-4 sm:p-6 lg:p-8"><div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">Failed to load contacts. Please try again.</div></div>;
+  if (error) return <div className="p-4 sm:p-6 lg:p-8"><div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 px-4 py-3 rounded-lg text-sm">Failed to load contacts. Please try again.</div></div>;
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-[1600px] mx-auto space-y-5" data-testid="contacts-page">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="font-heading text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">Contacts</h1>
-          <p className="text-sm text-slate-500 mt-1">{contacts.length} contacts</p>
+          <h1 className="font-heading text-2xl sm:text-3xl font-bold text-slate-900 dark:text-slate-100 tracking-tight">Contacts</h1>
+          <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">{contacts.length} contacts</p>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={handleExportCSV} className="gap-1.5" data-testid="export-contacts-csv">
@@ -106,13 +119,13 @@ export default function ContactsPage() {
           </Button>
           <label className="cursor-pointer">
             <Button variant="outline" size="sm" className="gap-1.5 pointer-events-none" data-testid="import-contacts-csv">
-              <Upload className="w-4 h-4" /> Import
+              <Upload className="w-4 h-4" /> {importMutation.isPending ? 'Importing...' : 'Import'}
             </Button>
-            <input type="file" accept=".csv,.xlsx,.xls" onChange={handleImportCSV} className="hidden" />
+            <input type="file" accept=".csv,.xlsx,.xls" onChange={handleImportCSV} className="hidden" disabled={importMutation.isPending} />
           </label>
           <Dialog open={showAdd} onOpenChange={setShowAdd}>
             <DialogTrigger asChild>
-              <Button className="bg-slate-900 text-white hover:bg-slate-800 gap-2" data-testid="add-contact-button">
+              <Button className="bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-200 gap-2" data-testid="add-contact-button">
                 <Plus className="w-4 h-4" /> Add Contact
               </Button>
             </DialogTrigger>
@@ -127,11 +140,11 @@ export default function ContactsPage() {
       {/* Filters */}
       <div className="flex gap-3 flex-wrap" data-testid="contacts-filters">
         <div className="relative flex-1 min-w-[200px] max-w-sm">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-          <Input placeholder="Search contacts..." value={search} onChange={e => setSearch(e.target.value)} className="pl-10 bg-white border-slate-200 h-9 text-sm" data-testid="contacts-search-input" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 dark:text-slate-500" />
+          <Input placeholder="Search contacts..." value={search} onChange={e => setSearch(e.target.value)} className="pl-10 bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 h-9 text-sm dark:text-slate-200" data-testid="contacts-search-input" />
         </div>
         <Select value={filterType} onValueChange={v => setFilterType(v === 'all' ? '' : v)}>
-          <SelectTrigger className="w-[180px] h-9 text-sm bg-white" data-testid="contacts-type-filter">
+          <SelectTrigger className="w-[180px] h-9 text-sm bg-white dark:bg-slate-800 dark:border-slate-700" data-testid="contacts-type-filter">
             <SelectValue placeholder="All Types" />
           </SelectTrigger>
           <SelectContent>
@@ -143,54 +156,54 @@ export default function ContactsPage() {
 
       {/* Table */}
       {loading ? (
-        <div className="space-y-2">{[1,2,3].map(i => <div key={i} className="h-16 bg-slate-100 rounded-lg animate-pulse" />)}</div>
+        <div className="space-y-2">{[1,2,3].map(i => <div key={i} className="h-16 bg-slate-100 dark:bg-slate-800 rounded-lg animate-pulse" />)}</div>
       ) : contacts.length === 0 ? (
-        <div className="bg-white border border-slate-200 rounded-lg p-12 text-center" data-testid="contacts-empty-state">
-          <p className="text-slate-500 text-sm mb-3">No contacts yet. Add your first contact or import via API.</p>
-          <Button onClick={() => setShowAdd(true)} className="bg-slate-900 text-white hover:bg-slate-800 gap-2"><Plus className="w-4 h-4" /> Add Contact</Button>
+        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg p-12 text-center" data-testid="contacts-empty-state">
+          <p className="text-slate-500 dark:text-slate-400 text-sm mb-3">No contacts yet. Add your first contact or import via API.</p>
+          <Button onClick={() => setShowAdd(true)} className="bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-200 gap-2"><Plus className="w-4 h-4" /> Add Contact</Button>
         </div>
       ) : (
-        <div className="bg-white border border-slate-200 rounded-lg shadow-sm overflow-hidden" data-testid="contacts-table">
+        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg shadow-sm overflow-hidden" data-testid="contacts-table">
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
               <thead>
-                <tr className="bg-slate-50 border-y border-slate-200">
-                  <th className="text-xs font-semibold text-slate-500 uppercase tracking-wider py-3 px-4">Name</th>
-                  <th className="text-xs font-semibold text-slate-500 uppercase tracking-wider py-3 px-4 hidden sm:table-cell">Contact</th>
-                  <th className="text-xs font-semibold text-slate-500 uppercase tracking-wider py-3 px-4 hidden md:table-cell">Type</th>
-                  <th className="text-xs font-semibold text-slate-500 uppercase tracking-wider py-3 px-4 hidden lg:table-cell">Source</th>
-                  <th className="text-xs font-semibold text-slate-500 uppercase tracking-wider py-3 px-4">Score</th>
-                  <th className="text-xs font-semibold text-slate-500 uppercase tracking-wider py-3 px-4 w-12"></th>
+                <tr className="bg-slate-50 dark:bg-slate-700/50 border-y border-slate-200 dark:border-slate-700">
+                  <th className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider py-3 px-4">Name</th>
+                  <th className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider py-3 px-4 hidden sm:table-cell">Contact</th>
+                  <th className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider py-3 px-4 hidden md:table-cell">Type</th>
+                  <th className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider py-3 px-4 hidden lg:table-cell">Source</th>
+                  <th className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider py-3 px-4">Score</th>
+                  <th className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider py-3 px-4 w-12"></th>
                 </tr>
               </thead>
               <tbody>
                 {contacts.map(c => (
-                  <tr key={c.id} className="border-b border-slate-200 hover:bg-slate-50 transition-colors cursor-pointer" onClick={() => navigate(`/contacts/${c.id}`)} data-testid={`contact-row-${c.id}`}>
+                  <tr key={c.id} className="border-b border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors cursor-pointer" onClick={() => navigate(`/contacts/${c.id}`)} data-testid={`contact-row-${c.id}`}>
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-full bg-slate-200 flex items-center justify-center flex-shrink-0">
-                          <span className="text-sm font-semibold text-slate-600">{c.name?.charAt(0)?.toUpperCase()}</span>
+                        <div className="w-9 h-9 rounded-full bg-slate-200 dark:bg-slate-600 flex items-center justify-center flex-shrink-0">
+                          <span className="text-sm font-semibold text-slate-600 dark:text-slate-300">{c.name?.charAt(0)?.toUpperCase()}</span>
                         </div>
                         <div>
-                          <p className="text-sm font-medium text-slate-900">{c.name}</p>
-                          {c.company && <p className="text-xs text-slate-500">{c.company}</p>}
+                          <p className="text-sm font-medium text-slate-900 dark:text-slate-100">{c.name}</p>
+                          {c.company && <p className="text-xs text-slate-500 dark:text-slate-400">{c.company}</p>}
                         </div>
                       </div>
                     </td>
                     <td className="py-3 px-4 hidden sm:table-cell">
                       <div className="space-y-0.5">
-                        {c.email && <p className="text-sm text-slate-600 flex items-center gap-1"><Mail className="w-3 h-3" /> {c.email}</p>}
-                        {c.phone && <p className="text-sm text-slate-600 flex items-center gap-1"><Phone className="w-3 h-3" /> {c.phone}</p>}
+                        {c.email && <p className="text-sm text-slate-600 dark:text-slate-400 flex items-center gap-1"><Mail className="w-3 h-3" /> {c.email}</p>}
+                        {c.phone && <p className="text-sm text-slate-600 dark:text-slate-400 flex items-center gap-1"><Phone className="w-3 h-3" /> {c.phone}</p>}
                       </div>
                     </td>
                     <td className="py-3 px-4 hidden md:table-cell">
                       <Badge variant="outline" className="text-xs">{PROPERTY_TYPES.find(t => t.value === c.property_type)?.label || c.property_type}</Badge>
                     </td>
                     <td className="py-3 px-4 hidden lg:table-cell">
-                      <span className="text-sm text-slate-500">{c.source}</span>
+                      <span className="text-sm text-slate-500 dark:text-slate-400">{c.source}</span>
                     </td>
                     <td className="py-3 px-4">
-                      <div className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${c.lead_score >= 70 ? 'bg-green-100 text-green-800' : c.lead_score >= 40 ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-600'}`}>
+                      <div className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${c.lead_score >= 70 ? 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-400' : c.lead_score >= 40 ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-400' : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400'}`}>
                         {c.lead_score || 0}
                       </div>
                     </td>
@@ -208,7 +221,7 @@ export default function ContactsPage() {
                           <DropdownMenuItem onClick={() => handleAIScore(c.id)} data-testid={`score-contact-${c.id}`}>
                             <Sparkles className="w-4 h-4 mr-2 text-amber-500" /> AI Score
                           </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => handleDelete(c.id)} className="text-red-600" data-testid={`delete-contact-${c.id}`}>
+                          <DropdownMenuItem onClick={() => handleDelete(c.id)} className="text-red-600 dark:text-red-400" data-testid={`delete-contact-${c.id}`}>
                             <Trash2 className="w-4 h-4 mr-2" /> Delete
                           </DropdownMenuItem>
                         </DropdownMenuContent>
@@ -227,6 +240,80 @@ export default function ContactsPage() {
         <DialogContent className="sm:max-w-md" data-testid="edit-contact-dialog">
           <DialogHeader><DialogTitle>Edit Contact</DialogTitle></DialogHeader>
           {editContact && <ContactForm initial={editContact} onSubmit={async (d) => { await api.put(`/contacts/${editContact.id}`, d); setEditContact(null); invalidateContacts(); }} />}
+        </DialogContent>
+      </Dialog>
+
+      {/* Import Result Dialog */}
+      <Dialog open={!!importResult} onOpenChange={(o) => { if (!o) setImportResult(null); }}>
+        <DialogContent className="sm:max-w-lg max-h-[80vh] overflow-y-auto" data-testid="import-result-dialog">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {importResult?.error ? (
+                <><XCircle className="w-5 h-5 text-red-500" /> Import Failed</>
+              ) : (
+                <><CheckCircle2 className="w-5 h-5 text-green-500" /> Import Complete</>
+              )}
+            </DialogTitle>
+          </DialogHeader>
+          {importResult?.error ? (
+            <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4">
+              <p className="text-sm text-red-700 dark:text-red-400">{importResult.error}</p>
+            </div>
+          ) : importResult && (
+            <div className="space-y-4">
+              {/* Summary Cards */}
+              <div className="grid grid-cols-3 gap-3">
+                <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-3 text-center">
+                  <p className="text-2xl font-bold text-green-700 dark:text-green-400">{importResult.imported}</p>
+                  <p className="text-xs text-green-600 dark:text-green-500">Imported</p>
+                </div>
+                <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3 text-center">
+                  <p className="text-2xl font-bold text-red-700 dark:text-red-400">{importResult.skipped || 0}</p>
+                  <p className="text-xs text-red-600 dark:text-red-500">Skipped</p>
+                </div>
+                <div className="bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg p-3 text-center">
+                  <p className="text-2xl font-bold text-slate-700 dark:text-slate-300">{importResult.total_rows}</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">Total Rows</p>
+                </div>
+              </div>
+              {/* Error Details */}
+              {importResult.errors && importResult.errors.length > 0 && (
+                <div>
+                  <h4 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2 flex items-center gap-1.5">
+                    <AlertTriangle className="w-4 h-4 text-amber-500" />
+                    Issues ({importResult.errors.length})
+                  </h4>
+                  <div className="bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800 rounded-lg divide-y divide-amber-200 dark:divide-amber-800 max-h-48 overflow-y-auto">
+                    {importResult.errors.map((err, idx) => (
+                      <div key={idx} className="px-3 py-2 text-sm">
+                        {typeof err === 'string' ? (
+                          <p className="text-amber-800 dark:text-amber-400">{err}</p>
+                        ) : (
+                          <div className="flex items-start gap-2">
+                            <span className="font-mono text-xs bg-amber-200 dark:bg-amber-800 text-amber-800 dark:text-amber-300 px-1.5 py-0.5 rounded flex-shrink-0">Row {err.row}</span>
+                            <div>
+                              {err.field && err.field !== 'unknown' && (
+                                <span className="text-xs font-medium text-amber-700 dark:text-amber-400 mr-1">[{err.field}]</span>
+                              )}
+                              <span className="text-amber-800 dark:text-amber-400">{err.reason}</span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {importResult.errors?.length === 0 && (
+                <p className="text-sm text-green-700 dark:text-green-400 text-center py-2">All rows imported successfully!</p>
+              )}
+            </div>
+          )}
+          <div className="flex justify-end pt-2">
+            <Button onClick={() => setImportResult(null)} variant="outline" size="sm" data-testid="close-import-result">
+              Close
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
     </div>
@@ -265,38 +352,38 @@ function ContactForm({ initial, onSubmit }) {
     <form onSubmit={handleSubmit} className="space-y-4">
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Name *</Label>
-          <Input value={form.name} onChange={e => setForm({...form, name: e.target.value})} required className="bg-white border-slate-300" data-testid="contact-form-name" />
+          <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Name *</Label>
+          <Input value={form.name} onChange={e => setForm({...form, name: e.target.value})} required className="bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600" data-testid="contact-form-name" />
         </div>
         <div>
-          <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Email</Label>
-          <Input type="email" value={form.email} onChange={e => setForm({...form, email: e.target.value})} className="bg-white border-slate-300" data-testid="contact-form-email" />
-        </div>
-      </div>
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Phone</Label>
-          <Input value={form.phone} onChange={e => setForm({...form, phone: e.target.value})} className="bg-white border-slate-300" data-testid="contact-form-phone" />
-        </div>
-        <div>
-          <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Company</Label>
-          <Input value={form.company} onChange={e => setForm({...form, company: e.target.value})} className="bg-white border-slate-300" data-testid="contact-form-company" />
+          <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Email</Label>
+          <Input type="email" value={form.email} onChange={e => setForm({...form, email: e.target.value})} className="bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600" data-testid="contact-form-email" />
         </div>
       </div>
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Type</Label>
+          <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Phone</Label>
+          <Input value={form.phone} onChange={e => setForm({...form, phone: e.target.value})} className="bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600" data-testid="contact-form-phone" />
+        </div>
+        <div>
+          <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Company</Label>
+          <Input value={form.company} onChange={e => setForm({...form, company: e.target.value})} className="bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600" data-testid="contact-form-company" />
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Type</Label>
           <Select value={form.property_type} onValueChange={v => setForm({...form, property_type: v})}>
-            <SelectTrigger className="bg-white" data-testid="contact-form-type"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="bg-white dark:bg-slate-700 dark:border-slate-600" data-testid="contact-form-type"><SelectValue /></SelectTrigger>
             <SelectContent>
               {PROPERTY_TYPES.map(t => <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>)}
             </SelectContent>
           </Select>
         </div>
         <div>
-          <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Source</Label>
+          <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Source</Label>
           <Select value={form.source} onValueChange={v => setForm({...form, source: v})}>
-            <SelectTrigger className="bg-white" data-testid="contact-form-source"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="bg-white dark:bg-slate-700 dark:border-slate-600" data-testid="contact-form-source"><SelectValue /></SelectTrigger>
             <SelectContent>
               {['manual', 'website', 'referral', 'zillow', 'realtor', 'cold_call', 'maxclaw'].map(s => <SelectItem key={s} value={s}>{s.replace('_', ' ')}</SelectItem>)}
             </SelectContent>
@@ -304,7 +391,7 @@ function ContactForm({ initial, onSubmit }) {
         </div>
       </div>
       <div>
-        <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Tags</Label>
+        <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Tags</Label>
         <div className="flex gap-2 flex-wrap mb-2">
           {form.tags.map(t => (
             <Badge key={t} variant="secondary" className="gap-1 cursor-pointer" onClick={() => setForm({...form, tags: form.tags.filter(x => x !== t)})}>
@@ -313,15 +400,15 @@ function ContactForm({ initial, onSubmit }) {
           ))}
         </div>
         <div className="flex gap-2">
-          <Input value={tagInput} onChange={e => setTagInput(e.target.value)} placeholder="Add tag" className="bg-white border-slate-300 flex-1" onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addTag(); }}} data-testid="contact-form-tag-input" />
+          <Input value={tagInput} onChange={e => setTagInput(e.target.value)} placeholder="Add tag" className="bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600 flex-1" onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addTag(); }}} data-testid="contact-form-tag-input" />
           <Button type="button" variant="outline" size="sm" onClick={addTag}><Tag className="w-3 h-3 mr-1" /> Add</Button>
         </div>
       </div>
       <div>
-        <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Notes</Label>
-        <Textarea value={form.notes} onChange={e => setForm({...form, notes: e.target.value})} rows={2} className="bg-white border-slate-300" data-testid="contact-form-notes" />
+        <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Notes</Label>
+        <Textarea value={form.notes} onChange={e => setForm({...form, notes: e.target.value})} rows={2} className="bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600" data-testid="contact-form-notes" />
       </div>
-      <Button type="submit" disabled={submitting} className="w-full bg-slate-900 text-white hover:bg-slate-800" data-testid="contact-form-submit">
+      <Button type="submit" disabled={submitting} className="w-full bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-200" data-testid="contact-form-submit">
         {submitting ? 'Saving...' : initial ? 'Update Contact' : 'Add Contact'}
       </Button>
     </form>

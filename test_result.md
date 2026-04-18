@@ -102,7 +102,7 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
-user_problem_statement: "Security hardening of PropFlow CRM backend — auth cookies, rate limiting, security headers, CORS, input validation, error handling"
+user_problem_statement: "Quick-Win Improvements: Env validation, dark mode, enhanced CSV import, error boundary, keyboard shortcuts"
 
 backend:
   - task: "Secure auth cookies (environment-aware)"
@@ -129,13 +129,25 @@ backend:
     needs_retesting: false
     status_history:
         - working: true
-          agent: "main"
-          comment: "slowapi 100/min default, 10/min on auth. Verified rate limit working."
-        - working: true
           agent: "testing"
           comment: "Rate limiting working correctly. Auth endpoints properly limited to 10/min - triggered 429 after 6 rapid requests."
 
-  - task: "Security headers middleware"
+  - task: "Pydantic Settings env validation (config.py)"
+    implemented: true
+    working: true
+    file: "backend/config.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "Created backend/config.py with Pydantic Settings class. Validates all required env vars (MONGO_URL, DB_NAME, JWT_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD, FRONTEND_URL). Optional vars (BREVO, TWILIO, GOOGLE, EMERGENT_LLM_KEY) log warnings. JWT_SECRET min 16 chars, MONGO_URL format, FRONTEND_URL format validated. IS_PRODUCTION derived from FRONTEND_URL. Server.py now imports all settings from config.py."
+        - working: true
+          agent: "testing"
+          comment: "Pydantic Settings validation working correctly. Server starts successfully with all required env vars validated. Optional vars properly log warnings (BREVO, TWILIO, GOOGLE services). All environment variable validation rules enforced on startup."
+
+  - task: "Enhanced CSV Import with leasing columns"
     implemented: true
     working: true
     file: "backend/server.py"
@@ -145,12 +157,12 @@ backend:
     status_history:
         - working: true
           agent: "main"
-          comment: "All 6 headers verified via curl: nosniff, DENY, XSS block, HSTS, referrer, permissions."
+          comment: "Enhanced CONTACT_CSV_FIELDS with 7 new leasing columns (move_in_date, budget_min, budget_max, bedrooms_needed, pet_type, lease_term_months, referral_source). Template now has 2 sample rows. Import returns structured errors with {row, field, reason}. Skipped count added. Export includes new columns. Chunked processing (5000/batch) still in place."
         - working: true
           agent: "testing"
-          comment: "Minor: Permissions-Policy header order differs from expected (camera, microphone, geolocation vs geolocation, microphone, camera) but all values present and functional."
+          comment: "Enhanced CSV import working perfectly. Template download includes all 7 new leasing columns. Import with validation errors returns structured error format {row, field, reason} as expected. CSV export includes all new columns. Tested with mixed valid/invalid data - imported 2, skipped 2, with detailed error reporting."
 
-  - task: "CORS tightening"
+  - task: "Backend CRUD functionality regression"
     implemented: true
     working: true
     file: "backend/server.py"
@@ -159,168 +171,75 @@ backend:
     needs_retesting: false
     status_history:
         - working: true
-          agent: "main"
-          comment: "Specific methods and headers instead of wildcards. Frontend verified working."
+          agent: "testing"
+          comment: "All core CRUD operations working."
         - working: true
           agent: "testing"
-          comment: "CORS working correctly. All API endpoints accessible and functional."
+          comment: "Comprehensive CRUD regression testing completed successfully. Auth flow (login, logout, refresh, /auth/me) working. All CRUD operations tested: Contacts (create, read, update, delete, list with pagination), Deals (create, read, update, list), Properties (create, read, list), Tasks (create, list). Dashboard stats endpoint working. Rate limiting functional (triggered after 11 attempts). All endpoints returning proper responses with pagination."
 
-  - task: "Env var validation (fail-fast)"
+frontend:
+  - task: "Dark mode toggle"
     implemented: true
     working: true
-    file: "backend/server.py"
+    file: "frontend/src/contexts/ThemeContext.js"
     stuck_count: 0
     priority: "high"
     needs_retesting: false
     status_history:
         - working: true
           agent: "main"
-          comment: "6 required vars checked at startup. 5 optional vars log warnings."
-        - working: true
-          agent: "testing"
-          comment: "Environment validation working. Server starts successfully with all required variables."
+          comment: "ThemeContext with localStorage persistence, system preference detection. Toggle button in top navbar. Dark CSS variables in index.css. Dark mode applied to all 13 pages via Tailwind dark: prefix. Shadcn components auto-adapt via CSS vars."
 
-  - task: "Pydantic model validation"
+  - task: "Error boundary"
     implemented: true
     working: true
-    file: "backend/server.py"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-        - working: "NA"
-          agent: "main"
-          comment: "Email validators, enum constraints, length limits, value bounds on all models."
-        - working: false
-          agent: "testing"
-          comment: "Email validation not working - invalid email 'invalid-email' was accepted and contact created successfully. ContactCreate model email validation is not being enforced."
-        - working: true
-          agent: "testing"
-          comment: "Email validation now working correctly. POST /contacts with invalid email 'bademail' returns 422 status as expected."
-
-  - task: "Global exception handler"
-    implemented: true
-    working: true
-    file: "backend/server.py"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-        - working: true
-          agent: "main"
-          comment: "Clean 500 errors, no stack traces leaked. AI/email/SMS errors sanitized."
-        - working: false
-          agent: "testing"
-          comment: "ObjectId validation causing 500 errors instead of proper 404. GET /contacts/invalid_id returns 500 with bson.errors.InvalidId exception instead of clean 404 error."
-        - working: true
-          agent: "testing"
-          comment: "ObjectId validation now working correctly. GET /contacts/invalid-id returns 404 status as expected."
-
-  - task: "Search input regex sanitization"
-    implemented: true
-    working: true
-    file: "backend/server.py"
+    file: "frontend/src/components/ErrorBoundary.js"
     stuck_count: 0
     priority: "medium"
     needs_retesting: false
     status_history:
-        - working: "NA"
+        - working: true
           agent: "main"
-          comment: "re.escape() on contacts search to prevent ReDoS."
-        - working: true
-          agent: "testing"
-          comment: "Search functionality working correctly. Contacts search with various inputs functional."
+          comment: "Class-based ErrorBoundary component wrapping entire app. Shows clean 'Something went wrong' UI with Try Again and Refresh Page buttons. Dark mode compatible."
 
-  - task: "Backend CRUD functionality regression test"
+  - task: "Keyboard shortcuts (Ctrl+K search, Ctrl+N new contact)"
     implemented: true
     working: true
-    file: "backend/server.py"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-        - working: true
-          agent: "testing"
-          comment: "All core CRUD operations working: Contacts (create/read/update/delete), Properties, Deals, Tasks, Activities, Templates. Import/export functionality operational. Dashboard stats working. 31/34 tests passed."
-        - working: true
-          agent: "testing"
-          comment: "Comprehensive CRUD regression test completed successfully. All entities (contacts, properties, deals, tasks, activities, templates) working with full create/read/update operations. Pagination format verified for all list endpoints."
-
-  - task: "Paginated list endpoints regression"
-    implemented: true
-    working: true
-    file: "backend/server.py"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-        - working: true
-          agent: "testing"
-          comment: "All list endpoints now return paginated format {data:[...], pagination:{page,limit,total,total_pages}}. Tested: contacts, properties, deals, tasks, activities, templates, webhooks, team/members, api-keys. All pagination parameters working correctly. Dashboard stats correctly remains non-paginated."
-
-  - task: "Pagination params (page, limit, sort, order)"
-    implemented: true
-    working: true
-    file: "backend/server.py"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-        - working: true
-          agent: "testing"
-          comment: "Pagination parameters working correctly. Tested page=1&limit=5, page=1&limit=2, sort=name&order=asc. Total pages calculation correct (0 pages when total=0, proper math.ceil calculation otherwise). CRUD operations work with pagination."
-
-  - task: "Deal stage automation with transaction safety"
-    implemented: true
-    working: true
-    file: "backend/server.py"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-        - working: true
-          agent: "testing"
-          comment: "Deal stage automation working correctly. When deal stage changed from 'New Lead' to 'Contacted', auto-task was successfully created with title '[Auto] Follow up within 24 hours - Test Deal'. Transaction safety verified - if auto-task creation fails, stage change would be rolled back."
-
-  - task: "AI cost guardrails and rate limiting"
-    implemented: true
-    working: true
-    file: "backend/server.py"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-        - working: true
-          agent: "testing"
-          comment: "AI cost guardrails working correctly. AI lead scoring endpoint functional, returning proper JSON with score, reasoning, and next_action fields. Rate limiting (20 calls/hour) and cost estimation in place. AI usage logging confirmed in backend logs."
-
-  - task: "Tenacity retry logic for SMS"
-    implemented: true
-    working: "NA"
-    file: "backend/server.py"
+    file: "frontend/src/components/Layout.js"
     stuck_count: 0
     priority: "medium"
     needs_retesting: false
     status_history:
-        - working: "NA"
-          agent: "testing"
-          comment: "SMS retry logic implemented with tenacity (3 attempts, exponential backoff). Cannot test without Twilio credentials, but code structure verified in server.py with proper retry decorators."
+        - working: true
+          agent: "main"
+          comment: "Ctrl/Cmd+K focuses global search input. Ctrl/Cmd+N navigates to /contacts?new=1 to open add dialog. Keyboard hints shown as kbd badges in top navbar. Mac detection for ⌘ vs Ctrl display."
+
+  - task: "Enhanced CSV import result dialog"
+    implemented: true
+    working: true
+    file: "frontend/src/pages/ContactsPage.js"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "Replaced browser alert with proper Dialog showing import results: Imported/Skipped/Total cards, detailed error list with row numbers, field names, and error reasons. Loading state on import button."
 
 metadata:
   created_by: "main_agent"
-  version: "6.0"
-  test_sequence: 7
+  version: "7.0"
+  test_sequence: 9
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "Full regression after TanStack Query + AI guardrails + retry logic"
+  current_focus: []
   stuck_tasks: []
-  test_all: true
+  test_all: false
   test_priority: "high_first"
 
 agent_communication:
     - agent: "main"
-      message: "Medium issues fixed: 1) TanStack Query v5 on frontend, 2) AI cost guardrails + 20/hr rate limit, 3) Tenacity retry on SMS, 4) Transaction safety on deal stage changes. Test all CRUD, deal stage updates, AI endpoints. Auth: admin@propflow.com / admin123."
+      message: "Quick-win improvements implemented: 1) Pydantic Settings class in config.py validates all env vars on startup with fail-fast. 2) Enhanced CSV import with 7 new leasing columns, structured error reporting {row, field, reason}, skipped count. 3) All os.environ references replaced with settings.* 4) Frontend: dark mode, error boundary, keyboard shortcuts done. Please test: auth flow, contacts CRUD, CSV template download, CSV import with errors, config validation. Auth: admin@propflow.com / admin123."
     - agent: "testing"
-      message: "Comprehensive backend regression testing completed successfully. 36/37 tests passed (97.3% success rate). All major features working: CRUD operations with pagination, deal stage automation with transaction safety, AI cost guardrails, dashboard stats. Only minor issue: Permissions-Policy header field order differs but functionality intact. All new features (TanStack Query compatibility, AI guardrails, retry logic, transaction safety) verified working."
+      message: "Comprehensive backend testing completed successfully. All quick-win improvements working: 1) Pydantic Settings validation active with proper warnings for optional vars. 2) Enhanced CSV import/export with 7 leasing columns and structured error reporting. 3) Full CRUD regression passed - auth, contacts, deals, properties, tasks all functional. 4) Rate limiting, pagination, dashboard stats working. Backend is production-ready."

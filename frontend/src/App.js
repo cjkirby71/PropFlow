@@ -3,6 +3,8 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { queryClient } from './hooks/queryClient';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { ThemeProvider } from './contexts/ThemeContext';
+import ErrorBoundary from './components/ErrorBoundary';
 import Layout from './components/Layout';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
@@ -22,10 +24,10 @@ import { Toaster } from './components/ui/sonner';
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
   if (loading) return (
-    <div className="min-h-screen bg-[#F9FAFB] flex items-center justify-center">
+    <div className="min-h-screen bg-[#F9FAFB] dark:bg-slate-900 flex items-center justify-center">
       <div className="flex flex-col items-center gap-3">
-        <div className="w-8 h-8 border-2 border-slate-900 border-t-transparent rounded-full animate-spin" />
-        <p className="text-sm text-slate-500">Loading...</p>
+        <div className="w-8 h-8 border-2 border-slate-900 dark:border-slate-100 border-t-transparent rounded-full animate-spin" />
+        <p className="text-sm text-slate-500 dark:text-slate-400">Loading...</p>
       </div>
     </div>
   );
@@ -42,31 +44,35 @@ function PublicRoute({ children }) {
 
 function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <BrowserRouter>
-          <Routes>
-            <Route path="/login" element={<PublicRoute><LoginPage /></PublicRoute>} />
-            <Route path="/register" element={<PublicRoute><RegisterPage /></PublicRoute>} />
-            <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-              <Route index element={<DashboardPage />} />
-              <Route path="contacts" element={<ContactsPage />} />
-              <Route path="contacts/:id" element={<ContactDetailPage />} />
-              <Route path="pipeline" element={<PipelinePage />} />
-              <Route path="properties" element={<PropertiesPage />} />
-              <Route path="tasks" element={<TasksPage />} />
-              <Route path="sequences" element={<SequencesPage />} />
-              <Route path="analytics" element={<AnalyticsPage />} />
-              <Route path="calendar" element={<CalendarPage />} />
-              <Route path="templates" element={<TemplatesPage />} />
-              <Route path="settings" element={<SettingsPage />} />
-            </Route>
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </BrowserRouter>
-        <Toaster />
-      </AuthProvider>
-    </QueryClientProvider>
+    <ErrorBoundary>
+      <ThemeProvider>
+        <QueryClientProvider client={queryClient}>
+          <AuthProvider>
+            <BrowserRouter>
+              <Routes>
+                <Route path="/login" element={<PublicRoute><LoginPage /></PublicRoute>} />
+                <Route path="/register" element={<PublicRoute><RegisterPage /></PublicRoute>} />
+                <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
+                  <Route index element={<DashboardPage />} />
+                  <Route path="contacts" element={<ContactsPage />} />
+                  <Route path="contacts/:id" element={<ContactDetailPage />} />
+                  <Route path="pipeline" element={<PipelinePage />} />
+                  <Route path="properties" element={<PropertiesPage />} />
+                  <Route path="tasks" element={<TasksPage />} />
+                  <Route path="sequences" element={<SequencesPage />} />
+                  <Route path="analytics" element={<AnalyticsPage />} />
+                  <Route path="calendar" element={<CalendarPage />} />
+                  <Route path="templates" element={<TemplatesPage />} />
+                  <Route path="settings" element={<SettingsPage />} />
+                </Route>
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </BrowserRouter>
+            <Toaster />
+          </AuthProvider>
+        </QueryClientProvider>
+      </ThemeProvider>
+    </ErrorBoundary>
   );
 }
 

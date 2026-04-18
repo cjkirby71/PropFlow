@@ -24,11 +24,11 @@ const STAGE_COLORS = {
   'Contacted': 'bg-yellow-50 border-yellow-200',
   'Showing': 'bg-lime-50 border-lime-200',
   'Application': 'bg-orange-50 border-orange-200',
-  'Lease Signed': 'bg-green-50 border-green-200',
+  'Lease Signed': 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800',
   'Tour': 'bg-lime-50 border-lime-200',
   'LOI': 'bg-orange-50 border-orange-200',
-  'Due Diligence': 'bg-amber-50 border-amber-200',
-  'Closing': 'bg-emerald-50 border-emerald-200',
+  'Due Diligence': 'bg-amber-50 dark:bg-amber-900/20 border-amber-200',
+  'Closing': 'bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200',
   'Proposal': 'bg-sky-50 border-sky-200',
   'Negotiation': 'bg-purple-50 border-purple-200',
   'Closed': 'bg-green-100 border-green-300',
@@ -71,14 +71,14 @@ export default function PipelinePage() {
   const getContactName = (contactId) => contacts.find(c => c.id === contactId)?.name || '';
   const getPropertyName = (propertyId) => properties.find(p => p.id === propertyId)?.name || '';
 
-  if (error) return <div className="p-4 sm:p-6 lg:p-8"><div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">Failed to load pipeline. Please try again.</div></div>;
+  if (error) return <div className="p-4 sm:p-6 lg:p-8"><div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 px-4 py-3 rounded-lg text-sm">Failed to load pipeline. Please try again.</div></div>;
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-[1600px] mx-auto space-y-5" data-testid="pipeline-page">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="font-heading text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">Pipeline</h1>
-          <p className="text-sm text-slate-500 mt-1">Drag deals between stages to update</p>
+          <h1 className="font-heading text-2xl sm:text-3xl font-bold text-slate-900 dark:text-slate-100 tracking-tight">Pipeline</h1>
+          <p className="text-sm text-slate-500 dark:text-slate-400 dark:text-slate-500 mt-1">Drag deals between stages to update</p>
         </div>
         <Dialog open={showAdd} onOpenChange={setShowAdd}>
           <DialogTrigger asChild>
@@ -95,7 +95,7 @@ export default function PipelinePage() {
 
       {/* Pipeline tabs */}
       <Tabs value={pipeline} onValueChange={setPipeline} data-testid="pipeline-tabs">
-        <TabsList className="bg-slate-100">
+        <TabsList className="bg-slate-100 dark:bg-slate-700">
           {Object.entries(PIPELINE_LABELS).map(([k, v]) => (
             <TabsTrigger key={k} value={k} className="data-[state=active]:bg-white data-[state=active]:shadow-sm text-sm" data-testid={`pipeline-tab-${k}`}>{v}</TabsTrigger>
           ))}
@@ -104,7 +104,7 @@ export default function PipelinePage() {
 
       {/* Kanban Board */}
       {loading ? (
-        <div className="flex gap-4 overflow-x-auto pb-4">{[1,2,3,4].map(i => <div key={i} className="w-80 flex-shrink-0 h-96 bg-slate-100 rounded-lg animate-pulse" />)}</div>
+        <div className="flex gap-4 overflow-x-auto pb-4">{[1,2,3,4].map(i => <div key={i} className="w-80 flex-shrink-0 h-96 bg-slate-100 dark:bg-slate-700 rounded-lg animate-pulse" />)}</div>
       ) : (
         <DragDropContext onDragEnd={handleDragEnd}>
           <div className="flex overflow-x-auto gap-4 pb-4" style={{ minHeight: 'calc(100vh - 280px)' }} data-testid="pipeline-board">
@@ -114,13 +114,13 @@ export default function PipelinePage() {
                   <div
                     ref={provided.innerRef}
                     {...provided.droppableProps}
-                    className={`w-80 flex-shrink-0 flex flex-col rounded-lg border ${STAGE_COLORS[stage] || 'bg-slate-50 border-slate-200'} ${snapshot.isDraggingOver ? 'ring-2 ring-blue-400' : ''}`}
+                    className={`w-80 flex-shrink-0 flex flex-col rounded-lg border ${STAGE_COLORS[stage] || 'bg-slate-50 dark:bg-slate-700/50 border-slate-200 dark:border-slate-700'} ${snapshot.isDraggingOver ? 'ring-2 ring-blue-400' : ''}`}
                     data-testid={`pipeline-column-${stage.toLowerCase().replace(/\s+/g, '-')}`}
                   >
-                    <div className="px-3 py-3 border-b border-slate-200/60">
+                    <div className="px-3 py-3 border-b border-slate-200 dark:border-slate-700/60">
                       <div className="flex items-center justify-between">
-                        <h3 className="text-sm font-semibold text-slate-800">{stage}</h3>
-                        <span className="text-xs font-semibold text-slate-500 bg-white/80 px-2 py-0.5 rounded-full">{dealsByStage[stage]?.length || 0}</span>
+                        <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-200">{stage}</h3>
+                        <span className="text-xs font-semibold text-slate-500 dark:text-slate-400 dark:text-slate-500 bg-white dark:bg-slate-800/80 px-2 py-0.5 rounded-full">{dealsByStage[stage]?.length || 0}</span>
                       </div>
                     </div>
                     <div className="flex-1 p-2 space-y-2 overflow-y-auto min-h-[100px]">
@@ -131,28 +131,28 @@ export default function PipelinePage() {
                               ref={provided.innerRef}
                               {...provided.draggableProps}
                               {...provided.dragHandleProps}
-                              className={`bg-white border border-slate-200 rounded-lg p-3 shadow-sm hover:shadow-md transition-shadow ${snapshot.isDragging ? 'shadow-lg scale-105 rotate-1' : ''}`}
+                              className={`bg-white border border-slate-200 dark:border-slate-700 rounded-lg p-3 shadow-sm hover:shadow-md transition-shadow ${snapshot.isDragging ? 'shadow-lg scale-105 rotate-1' : ''}`}
                               data-testid={`deal-card-${deal.id}`}
                             >
                               <div className="flex items-start justify-between">
-                                <h4 className="text-sm font-medium text-slate-900 leading-tight">{deal.title}</h4>
+                                <h4 className="text-sm font-medium text-slate-900 dark:text-slate-100 leading-tight">{deal.title}</h4>
                                 <DropdownMenu>
                                   <DropdownMenuTrigger asChild>
-                                    <button className="p-1 hover:bg-slate-100 rounded" data-testid={`deal-menu-${deal.id}`}><MoreHorizontal className="w-3.5 h-3.5 text-slate-400" /></button>
+                                    <button className="p-1 hover:bg-slate-100 dark:bg-slate-700 rounded" data-testid={`deal-menu-${deal.id}`}><MoreHorizontal className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500" /></button>
                                   </DropdownMenuTrigger>
                                   <DropdownMenuContent align="end">
                                     <DropdownMenuItem onClick={() => setEditDeal(deal)}><Edit className="w-3.5 h-3.5 mr-2" /> Edit</DropdownMenuItem>
-                                    <DropdownMenuItem onClick={() => handleDelete(deal.id)} className="text-red-600"><Trash2 className="w-3.5 h-3.5 mr-2" /> Delete</DropdownMenuItem>
+                                    <DropdownMenuItem onClick={() => handleDelete(deal.id)} className="text-red-600 dark:text-red-400"><Trash2 className="w-3.5 h-3.5 mr-2" /> Delete</DropdownMenuItem>
                                   </DropdownMenuContent>
                                 </DropdownMenu>
                               </div>
                               <div className="mt-2 space-y-1">
-                                {deal.contact_id && <p className="text-xs text-slate-500 flex items-center gap-1"><User className="w-3 h-3" /> {getContactName(deal.contact_id)}</p>}
-                                {deal.property_id && <p className="text-xs text-slate-500 flex items-center gap-1"><Building2 className="w-3 h-3" /> {getPropertyName(deal.property_id)}</p>}
+                                {deal.contact_id && <p className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500 flex items-center gap-1"><User className="w-3 h-3" /> {getContactName(deal.contact_id)}</p>}
+                                {deal.property_id && <p className="text-xs text-slate-500 dark:text-slate-400 dark:text-slate-500 flex items-center gap-1"><Building2 className="w-3 h-3" /> {getPropertyName(deal.property_id)}</p>}
                               </div>
                               {deal.value > 0 && (
-                                <div className="mt-2 pt-2 border-t border-slate-100">
-                                  <span className="text-xs font-semibold text-slate-700 flex items-center gap-1"><DollarSign className="w-3 h-3" /> {deal.value.toLocaleString()}</span>
+                                <div className="mt-2 pt-2 border-t border-slate-100 dark:border-slate-700">
+                                  <span className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1"><DollarSign className="w-3 h-3" /> {deal.value.toLocaleString()}</span>
                                 </div>
                               )}
                             </div>
@@ -161,7 +161,7 @@ export default function PipelinePage() {
                       ))}
                       {provided.placeholder}
                       {(!dealsByStage[stage] || dealsByStage[stage].length === 0) && (
-                        <div className="text-center py-8 text-xs text-slate-400">No deals</div>
+                        <div className="text-center py-8 text-xs text-slate-400 dark:text-slate-500">No deals</div>
                       )}
                     </div>
                   </div>
@@ -205,14 +205,14 @@ function DealForm({ initial, pipeline, stages, contacts, properties, onSubmit })
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <div>
-        <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Title *</Label>
-        <Input value={form.title} onChange={e => setForm({...form, title: e.target.value})} required className="bg-white border-slate-300" data-testid="deal-form-title" />
+        <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Title *</Label>
+        <Input value={form.title} onChange={e => setForm({...form, title: e.target.value})} required className="bg-white border-slate-300 dark:border-slate-600" data-testid="deal-form-title" />
       </div>
       {!initial && (
         <div>
-          <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Stage</Label>
+          <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Stage</Label>
           <Select value={form.stage} onValueChange={v => setForm({...form, stage: v})}>
-            <SelectTrigger className="bg-white" data-testid="deal-form-stage"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="bg-white dark:bg-slate-800" data-testid="deal-form-stage"><SelectValue /></SelectTrigger>
             <SelectContent>
               {stages.map(s => <SelectItem key={s} value={s}>{s}</SelectItem>)}
             </SelectContent>
@@ -221,9 +221,9 @@ function DealForm({ initial, pipeline, stages, contacts, properties, onSubmit })
       )}
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Contact</Label>
+          <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Contact</Label>
           <Select value={form.contact_id} onValueChange={v => setForm({...form, contact_id: v})}>
-            <SelectTrigger className="bg-white" data-testid="deal-form-contact"><SelectValue placeholder="Select contact" /></SelectTrigger>
+            <SelectTrigger className="bg-white dark:bg-slate-800" data-testid="deal-form-contact"><SelectValue placeholder="Select contact" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="none">No contact</SelectItem>
               {contacts.map(c => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
@@ -231,9 +231,9 @@ function DealForm({ initial, pipeline, stages, contacts, properties, onSubmit })
           </Select>
         </div>
         <div>
-          <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Property</Label>
+          <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Property</Label>
           <Select value={form.property_id} onValueChange={v => setForm({...form, property_id: v})}>
-            <SelectTrigger className="bg-white" data-testid="deal-form-property"><SelectValue placeholder="Select property" /></SelectTrigger>
+            <SelectTrigger className="bg-white dark:bg-slate-800" data-testid="deal-form-property"><SelectValue placeholder="Select property" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="none">No property</SelectItem>
               {properties.map(p => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
@@ -242,12 +242,12 @@ function DealForm({ initial, pipeline, stages, contacts, properties, onSubmit })
         </div>
       </div>
       <div>
-        <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Deal Value ($)</Label>
-        <Input type="number" value={form.value} onChange={e => setForm({...form, value: parseFloat(e.target.value) || 0})} className="bg-white border-slate-300" data-testid="deal-form-value" />
+        <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Deal Value ($)</Label>
+        <Input type="number" value={form.value} onChange={e => setForm({...form, value: parseFloat(e.target.value) || 0})} className="bg-white border-slate-300 dark:border-slate-600" data-testid="deal-form-value" />
       </div>
       <div>
-        <Label className="text-sm font-medium text-slate-700 mb-1.5 block">Notes</Label>
-        <Textarea value={form.notes} onChange={e => setForm({...form, notes: e.target.value})} rows={2} className="bg-white border-slate-300" data-testid="deal-form-notes" />
+        <Label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Notes</Label>
+        <Textarea value={form.notes} onChange={e => setForm({...form, notes: e.target.value})} rows={2} className="bg-white border-slate-300 dark:border-slate-600" data-testid="deal-form-notes" />
       </div>
       <Button type="submit" disabled={submitting} className="w-full bg-slate-900 text-white hover:bg-slate-800" data-testid="deal-form-submit">
         {submitting ? 'Saving...' : initial ? 'Update Deal' : 'Create Deal'}
