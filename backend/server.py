@@ -208,6 +208,14 @@ class ContactCreate(BaseModel):
     notes: Optional[str] = Field(default="", max_length=5000)
     lead_score: Optional[int] = Field(default=0, ge=0, le=100)
 
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v):
+        if v and v.strip():
+            if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', v.strip()):
+                raise ValueError("Invalid email format")
+        return v
+
     @field_validator("property_type")
     @classmethod
     def validate_property_type(cls, v):
@@ -417,6 +425,14 @@ def serialize_doc(doc):
         del doc["_id"]
     return doc
 
+# SECURITY: Validate ObjectId format before passing to MongoDB
+# Prevents 500 errors from malformed IDs and potential injection
+def validate_object_id(id_str: str, entity: str = "Resource") -> ObjectId:
+    try:
+        return ObjectId(id_str)
+    except Exception:
+        raise HTTPException(status_code=404, detail=f"{entity} not found")
+
 # ─── Auth Routes ───
 # SECURITY: Strict rate limit on auth endpoints — 10 requests/minute per IP
 @api_router.post("/auth/register")
@@ -581,7 +597,7 @@ async def get_contact_import_template():
 
 @api_router.get("/contacts/{contact_id}")
 async def get_contact(contact_id: str, user=Depends(get_any_auth_user)):
-    contact = await db.contacts.find_one({"_id": ObjectId(contact_id), "user_id": user["_id"]})
+    contact = await db.contacts.find_one({"_id": validate_object_id(contact_id, "Contact"), "user_id": user["_id"]})
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
     return serialize_doc(contact)
@@ -590,15 +606,15 @@ async def get_contact(contact_id: str, user=Depends(get_any_auth_user)):
 async def update_contact(contact_id: str, data: ContactUpdate, user=Depends(get_any_auth_user)):
     updates = {k: v for k, v in data.model_dump().items() if v is not None}
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-    result = await db.contacts.update_one({"_id": ObjectId(contact_id), "user_id": user["_id"]}, {"$set": updates})
+    result = await db.contacts.update_one({"_id": validate_object_id(contact_id, "Contact"), "user_id": user["_id"]}, {"$set": updates})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Contact not found")
-    contact = await db.contacts.find_one({"_id": ObjectId(contact_id)})
+    contact = await db.contacts.find_one({"_id": validate_object_id(contact_id, "Contact")})
     return serialize_doc(contact)
 
 @api_router.delete("/contacts/{contact_id}")
 async def delete_contact(contact_id: str, user=Depends(get_any_auth_user)):
-    result = await db.contacts.delete_one({"_id": ObjectId(contact_id), "user_id": user["_id"]})
+    result = await db.contacts.delete_one({"_id": validate_object_id(contact_id, "Contact"), "user_id": user["_id"]})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Contact not found")
     return {"message": "Contact deleted"}
@@ -725,7 +741,7 @@ async def get_property_import_template():
 
 @api_router.get("/properties/{property_id}")
 async def get_property(property_id: str, user=Depends(get_any_auth_user)):
-    prop = await db.properties.find_one({"_id": ObjectId(property_id), "user_id": user["_id"]})
+    prop = await db.properties.find_one({"_id": validate_object_id(property_id, "Property"), "user_id": user["_id"]})
     if not prop:
         raise HTTPException(status_code=404, detail="Property not found")
     return serialize_doc(prop)
@@ -734,15 +750,15 @@ async def get_property(property_id: str, user=Depends(get_any_auth_user)):
 async def update_property(property_id: str, data: dict, user=Depends(get_any_auth_user)):
     data["updated_at"] = datetime.now(timezone.utc).isoformat()
     data.pop("id", None)
-    result = await db.properties.update_one({"_id": ObjectId(property_id), "user_id": user["_id"]}, {"$set": data})
+    result = await db.properties.update_one({"_id": validate_object_id(property_id, "Property"), "user_id": user["_id"]}, {"$set": data})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Property not found")
-    prop = await db.properties.find_one({"_id": ObjectId(property_id)})
+    prop = await db.properties.find_one({"_id": validate_object_id(property_id, "Property")})
     return serialize_doc(prop)
 
 @api_router.delete("/properties/{property_id}")
 async def delete_property(property_id: str, user=Depends(get_any_auth_user)):
-    result = await db.properties.delete_one({"_id": ObjectId(property_id), "user_id": user["_id"]})
+    result = await db.properties.delete_one({"_id": validate_object_id(property_id, "Property"), "user_id": user["_id"]})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Property not found")
     return {"message": "Property deleted"}
@@ -777,14 +793,14 @@ async def list_deals(user=Depends(get_any_auth_user), pipeline_type: str = ""):
 
 @api_router.get("/deals/{deal_id}")
 async def get_deal(deal_id: str, user=Depends(get_any_auth_user)):
-    deal = await db.deals.find_one({"_id": ObjectId(deal_id), "user_id": user["_id"]})
+    deal = await db.deals.find_one({"_id": validate_object_id(deal_id, "Deal"), "user_id": user["_id"]})
     if not deal:
         raise HTTPException(status_code=404, detail="Deal not found")
     return serialize_doc(deal)
 
 @api_router.put("/deals/{deal_id}")
 async def update_deal(deal_id: str, data: DealUpdate, background_tasks: BackgroundTasks, user=Depends(get_any_auth_user)):
-    existing = await db.deals.find_one({"_id": ObjectId(deal_id), "user_id": user["_id"]})
+    existing = await db.deals.find_one({"_id": validate_object_id(deal_id, "Deal"), "user_id": user["_id"]})
     if not existing:
         raise HTTPException(status_code=404, detail="Deal not found")
     updates = {k: v for k, v in data.model_dump().items() if v is not None}
@@ -794,8 +810,8 @@ async def update_deal(deal_id: str, data: DealUpdate, background_tasks: Backgrou
         if updates["stage"] not in PIPELINE_STAGES[pipeline_type]:
             raise HTTPException(status_code=400, detail="Invalid stage for this pipeline")
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-    await db.deals.update_one({"_id": ObjectId(deal_id)}, {"$set": updates})
-    deal = await db.deals.find_one({"_id": ObjectId(deal_id)})
+    await db.deals.update_one({"_id": validate_object_id(deal_id, "Deal")}, {"$set": updates})
+    deal = await db.deals.find_one({"_id": validate_object_id(deal_id, "Deal")})
     serialized = serialize_doc(deal)
     # ─── Stage Automation: auto-create task on stage change ───
     new_stage = updates.get("stage")
@@ -825,7 +841,7 @@ async def update_deal(deal_id: str, data: DealUpdate, background_tasks: Backgrou
 
 @api_router.delete("/deals/{deal_id}")
 async def delete_deal(deal_id: str, user=Depends(get_any_auth_user)):
-    result = await db.deals.delete_one({"_id": ObjectId(deal_id), "user_id": user["_id"]})
+    result = await db.deals.delete_one({"_id": validate_object_id(deal_id, "Deal"), "user_id": user["_id"]})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Deal not found")
     return {"message": "Deal deleted"}
@@ -855,15 +871,15 @@ async def list_tasks(user=Depends(get_any_auth_user), completed: str = ""):
 async def update_task(task_id: str, data: dict, user=Depends(get_any_auth_user)):
     data.pop("id", None)
     data["updated_at"] = datetime.now(timezone.utc).isoformat()
-    result = await db.tasks.update_one({"_id": ObjectId(task_id), "user_id": user["_id"]}, {"$set": data})
+    result = await db.tasks.update_one({"_id": validate_object_id(task_id, "Task"), "user_id": user["_id"]}, {"$set": data})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Task not found")
-    task = await db.tasks.find_one({"_id": ObjectId(task_id)})
+    task = await db.tasks.find_one({"_id": validate_object_id(task_id, "Task")})
     return serialize_doc(task)
 
 @api_router.delete("/tasks/{task_id}")
 async def delete_task(task_id: str, user=Depends(get_any_auth_user)):
-    result = await db.tasks.delete_one({"_id": ObjectId(task_id), "user_id": user["_id"]})
+    result = await db.tasks.delete_one({"_id": validate_object_id(task_id, "Task"), "user_id": user["_id"]})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Task not found")
     return {"message": "Task deleted"}
@@ -892,7 +908,7 @@ async def list_activities(user=Depends(get_any_auth_user), contact_id: str = "",
 # ─── AI Routes ───
 @api_router.post("/ai/draft-email")
 async def ai_draft_email(data: AIEmailRequest, user=Depends(get_any_auth_user)):
-    contact = await db.contacts.find_one({"_id": ObjectId(data.contact_id), "user_id": user["_id"]})
+    contact = await db.contacts.find_one({"_id": validate_object_id(data.contact_id, "Contact"), "user_id": user["_id"]})
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
     activities = await db.activities.find({"contact_id": data.contact_id}).sort("created_at", -1).to_list(10)
@@ -925,7 +941,7 @@ Write a concise, professional email ready to send. Include subject line."""
 
 @api_router.post("/ai/lead-score")
 async def ai_lead_score(data: AILeadScoreRequest, user=Depends(get_any_auth_user)):
-    contact = await db.contacts.find_one({"_id": ObjectId(data.contact_id), "user_id": user["_id"]})
+    contact = await db.contacts.find_one({"_id": validate_object_id(data.contact_id, "Contact"), "user_id": user["_id"]})
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
     activities = await db.activities.find({"contact_id": data.contact_id}).to_list(50)
@@ -957,7 +973,7 @@ Respond ONLY with a JSON object: {{"score": <number 0-100>, "reasoning": "<brief
             if cleaned.startswith("```"):
                 cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
             score_data = json.loads(cleaned)
-            await db.contacts.update_one({"_id": ObjectId(data.contact_id)}, {"$set": {"lead_score": score_data.get("score", 0)}})
+            await db.contacts.update_one({"_id": validate_object_id(data.contact_id, "Contact")}, {"$set": {"lead_score": score_data.get("score", 0)}})
             return score_data
         except json.JSONDecodeError:
             return {"score": 50, "reasoning": result, "next_action": "Review manually"}
@@ -970,7 +986,7 @@ async def ai_summarize(contact_id: str, user=Depends(get_any_auth_user)):
     activities = await db.activities.find({"contact_id": contact_id, "user_id": user["_id"]}).sort("created_at", -1).to_list(50)
     if not activities:
         return {"summary": "No activities found for this contact."}
-    contact = await db.contacts.find_one({"_id": ObjectId(contact_id)})
+    contact = await db.contacts.find_one({"_id": validate_object_id(contact_id, "Contact")})
     activity_text = "\n".join([f"[{a.get('created_at','')}] {a.get('activity_type','')}: {a.get('description','')}" for a in activities])
     try:
         from emergentintegrations.llm.chat import LlmChat, UserMessage
@@ -1084,7 +1100,7 @@ async def list_templates(user=Depends(get_any_auth_user), category: str = ""):
 
 @api_router.get("/templates/{template_id}")
 async def get_template(template_id: str, user=Depends(get_any_auth_user)):
-    tpl = await db.templates.find_one({"_id": ObjectId(template_id), "user_id": user["_id"]})
+    tpl = await db.templates.find_one({"_id": validate_object_id(template_id, "Template"), "user_id": user["_id"]})
     if not tpl:
         raise HTTPException(status_code=404, detail="Template not found")
     return serialize_doc(tpl)
@@ -1093,15 +1109,15 @@ async def get_template(template_id: str, user=Depends(get_any_auth_user)):
 async def update_template(template_id: str, data: TemplateCreate, user=Depends(get_current_user)):
     updates = data.model_dump()
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-    result = await db.templates.update_one({"_id": ObjectId(template_id), "user_id": user["_id"]}, {"$set": updates})
+    result = await db.templates.update_one({"_id": validate_object_id(template_id, "Template"), "user_id": user["_id"]}, {"$set": updates})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Template not found")
-    tpl = await db.templates.find_one({"_id": ObjectId(template_id)})
+    tpl = await db.templates.find_one({"_id": validate_object_id(template_id, "Template")})
     return serialize_doc(tpl)
 
 @api_router.delete("/templates/{template_id}")
 async def delete_template(template_id: str, user=Depends(get_current_user)):
-    result = await db.templates.delete_one({"_id": ObjectId(template_id), "user_id": user["_id"]})
+    result = await db.templates.delete_one({"_id": validate_object_id(template_id, "Template"), "user_id": user["_id"]})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Template not found")
     return {"message": "Template deleted"}
@@ -1109,10 +1125,10 @@ async def delete_template(template_id: str, user=Depends(get_current_user)):
 @api_router.post("/templates/{template_id}/use")
 async def use_template(template_id: str, user=Depends(get_any_auth_user)):
     """Increment use count and return the template - for tracking popular templates"""
-    tpl = await db.templates.find_one({"_id": ObjectId(template_id), "user_id": user["_id"]})
+    tpl = await db.templates.find_one({"_id": validate_object_id(template_id, "Template"), "user_id": user["_id"]})
     if not tpl:
         raise HTTPException(status_code=404, detail="Template not found")
-    await db.templates.update_one({"_id": ObjectId(template_id)}, {"$inc": {"use_count": 1}})
+    await db.templates.update_one({"_id": validate_object_id(template_id, "Template")}, {"$inc": {"use_count": 1}})
     tpl["use_count"] = tpl.get("use_count", 0) + 1
     return serialize_doc(tpl)
 
@@ -1224,17 +1240,17 @@ async def list_webhooks(user=Depends(get_current_user)):
 
 @api_router.delete("/webhooks/{webhook_id}")
 async def delete_webhook(webhook_id: str, user=Depends(get_current_user)):
-    result = await db.webhooks.delete_one({"_id": ObjectId(webhook_id), "user_id": user["_id"]})
+    result = await db.webhooks.delete_one({"_id": validate_object_id(webhook_id, "Webhook"), "user_id": user["_id"]})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Webhook not found")
     return {"message": "Webhook deleted"}
 
 @api_router.put("/webhooks/{webhook_id}/toggle")
 async def toggle_webhook(webhook_id: str, user=Depends(get_current_user)):
-    wh = await db.webhooks.find_one({"_id": ObjectId(webhook_id), "user_id": user["_id"]})
+    wh = await db.webhooks.find_one({"_id": validate_object_id(webhook_id, "Webhook"), "user_id": user["_id"]})
     if not wh:
         raise HTTPException(status_code=404, detail="Webhook not found")
-    await db.webhooks.update_one({"_id": ObjectId(webhook_id)}, {"$set": {"active": not wh.get("active", True)}})
+    await db.webhooks.update_one({"_id": validate_object_id(webhook_id, "Webhook")}, {"$set": {"active": not wh.get("active", True)}})
     return {"active": not wh.get("active", True)}
 
 # ─── Team Management ───
@@ -1278,7 +1294,7 @@ async def remove_team_member(member_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Only admins can remove team members")
     if member_id == user["_id"]:
         raise HTTPException(status_code=400, detail="Cannot remove yourself")
-    result = await db.users.delete_one({"_id": ObjectId(member_id)})
+    result = await db.users.delete_one({"_id": validate_object_id(member_id, "Member")})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Member not found")
     return {"message": "Member removed"}
@@ -1289,7 +1305,7 @@ async def update_member_role(member_id: str, request: Request, user=Depends(get_
         raise HTTPException(status_code=403, detail="Only admins can change roles")
     body = await request.json()
     new_role = body.get("role", "agent")
-    await db.users.update_one({"_id": ObjectId(member_id)}, {"$set": {"role": new_role}})
+    await db.users.update_one({"_id": validate_object_id(member_id, "Member")}, {"$set": {"role": new_role}})
     return {"message": "Role updated"}
 
 @api_router.post("/api-keys")
