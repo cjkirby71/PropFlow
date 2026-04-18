@@ -47,14 +47,14 @@ export default function PipelinePage() {
     try {
       const [stagesRes, dealsRes, contactsRes, propsRes] = await Promise.all([
         api.get('/pipelines/stages'),
-        api.get('/deals', { params: { pipeline_type: pipeline } }),
-        api.get('/contacts'),
-        api.get('/properties'),
+        api.get('/deals', { params: { pipeline_type: pipeline, limit: 500 } }),
+        api.get('/contacts', { params: { limit: 500 } }),
+        api.get('/properties', { params: { limit: 500 } }),
       ]);
       setStages(stagesRes.data);
-      setDeals(dealsRes.data);
-      setContacts(contactsRes.data);
-      setProperties(propsRes.data);
+      setDeals(dealsRes.data.data || dealsRes.data);
+      setContacts(contactsRes.data.data || contactsRes.data);
+      setProperties(propsRes.data.data || propsRes.data);
     } catch (err) { console.error(err); }
     setLoading(false);
   }, [pipeline]);

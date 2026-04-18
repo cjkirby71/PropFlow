@@ -31,13 +31,13 @@ export default function TasksPage() {
       if (filter === 'active') params.completed = 'false';
       if (filter === 'completed') params.completed = 'true';
       const [tasksRes, contactsRes, dealsRes] = await Promise.all([
-        api.get('/tasks', { params }),
-        api.get('/contacts'),
-        api.get('/deals'),
+        api.get('/tasks', { params: { ...params, limit: 500 } }),
+        api.get('/contacts', { params: { limit: 500 } }),
+        api.get('/deals', { params: { limit: 500 } }),
       ]);
-      setTasks(tasksRes.data);
-      setContacts(contactsRes.data);
-      setDeals(dealsRes.data);
+      setTasks(tasksRes.data.data || tasksRes.data);
+      setContacts(contactsRes.data.data || contactsRes.data);
+      setDeals(dealsRes.data.data || dealsRes.data);
     } catch (err) { console.error(err); }
     setLoading(false);
   }, [filter]);

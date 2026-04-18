@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
 from datetime import datetime, timezone, timedelta
 from bson import ObjectId
+import math
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -433,6 +434,174 @@ def validate_object_id(id_str: str, entity: str = "Resource") -> ObjectId:
     except Exception:
         raise HTTPException(status_code=404, detail=f"{entity} not found")
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# PERFORMANCE: Paginated query helper
+# Used by all list endpoints. Returns { data: [...], pagination: {...} }
+# - page/limit for cursor-based pagination via skip/limit
+# - sort_field/sort_order for consistent ordering
+# - projection to return only needed fields (reduces network + memory)
+# - max limit capped at 500 to prevent abuse
+# ═══════════════════════════════════════════════════════════════════════════════
+PAGINATION_MAX_LIMIT = 500
+
+async def paginate(collection, query: dict, page: int = 1, limit: int = 50,
+                   sort_field: str = "created_at", sort_order: int = -1,
+                   projection: dict = None):
+    page = max(1, page)
+    limit = max(1, min(limit, PAGINATION_MAX_LIMIT))
+    skip_count = (page - 1) * limit
+    total = await collection.count_documents(query)
+    cursor = collection.find(query, projection).sort(sort_field, sort_order).skip(skip_count).limit(limit)
+    items = await cursor.to_list(limit)
+    return {
+        "data": [serialize_doc(doc) for doc in items],
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "total_pages": math.ceil(total / limit) if limit > 0 else 1,
+        }
+    }
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PERFORMANCE: MongoDB Index Definitions
+# Called once on startup. Indexes are created in the background to avoid
+# blocking writes. Each index is explained with its purpose.
+# ═══════════════════════════════════════════════════════════════════════════════
+async def create_mongodb_indexes():
+    """Create all performance-critical MongoDB indexes on startup."""
+    logger.info("Creating MongoDB indexes...")
+
+    # ── users collection ──
+    # Unique email lookup for auth (login, register, duplicate check)
+    await db.users.create_index("email", unique=True, background=True)
+
+    # ── login_attempts collection ──
+    # Fast lookup by IP:email identifier for brute-force protection
+    await db.login_attempts.create_index("identifier", background=True)
+    # TTL index: auto-delete old login attempt records after 1 hour
+    await db.login_attempts.create_index(
+        "last_attempt_dt",
+        expireAfterSeconds=3600,
+        background=True,
+        sparse=True
+    )
+
+    # ── contacts collection ──
+    # Primary query pattern: list contacts for a user, sorted by created_at
+    await db.contacts.create_index(
+        [("user_id", 1), ("created_at", -1)],
+        background=True,
+        name="idx_contacts_user_created"
+    )
+    # Unique email per user — prevents duplicate contacts (only enforced when email is non-empty)
+    await db.contacts.create_index(
+        [("user_id", 1), ("email", 1)],
+        unique=True,
+        background=True,
+        partialFilterExpression={"email": {"$gt": ""}},
+        name="idx_contacts_user_email_unique"
+    )
+    # Filter by property_type within a user's contacts
+    await db.contacts.create_index(
+        [("user_id", 1), ("property_type", 1)],
+        background=True,
+        name="idx_contacts_user_proptype"
+    )
+    # Search by name/email/phone — text index for fast full-text search
+    await db.contacts.create_index(
+        [("name", "text"), ("email", "text"), ("company", "text")],
+        background=True,
+        name="idx_contacts_text_search"
+    )
+    # Lead scoring / sorting
+    await db.contacts.create_index("lead_score", background=True)
+    # Status filter (for future use)
+    await db.contacts.create_index([("user_id", 1), ("status", 1)], background=True, sparse=True)
+    # Last activity timestamp (for future use / sorting by engagement)
+    await db.contacts.create_index("last_activity", background=True, sparse=True)
+
+    # ── deals collection ──
+    # Primary query: list deals by pipeline_type for kanban board
+    await db.deals.create_index(
+        [("user_id", 1), ("pipeline_type", 1), ("created_at", -1)],
+        background=True,
+        name="idx_deals_user_pipeline_created"
+    )
+    # Stage-based queries: filter/count deals by stage (dashboard, reporting)
+    await db.deals.create_index(
+        [("user_id", 1), ("stage", 1), ("created_at", -1)],
+        background=True,
+        name="idx_deals_user_stage_created"
+    )
+    # Lookup deals linked to a contact (contact detail page)
+    await db.deals.create_index("contact_id", background=True)
+    # Lookup deals assigned to a team member (future team features)
+    await db.deals.create_index("assigned_to", background=True, sparse=True)
+
+    # ── tasks collection ──
+    # Primary query: list tasks for a user sorted by due date
+    await db.tasks.create_index(
+        [("user_id", 1), ("due_date", 1)],
+        background=True,
+        name="idx_tasks_user_duedate"
+    )
+    # Filter by completion status (open tasks count for dashboard)
+    await db.tasks.create_index(
+        [("user_id", 1), ("completed", 1)],
+        background=True,
+        name="idx_tasks_user_completed"
+    )
+    # Lookup tasks linked to a contact or deal
+    await db.tasks.create_index("contact_id", background=True, sparse=True)
+    await db.tasks.create_index("deal_id", background=True, sparse=True)
+
+    # ── activities collection ──
+    # Primary query: activity timeline for a contact, newest first
+    await db.activities.create_index(
+        [("contact_id", 1), ("created_at", -1)],
+        background=True,
+        name="idx_activities_contact_created"
+    )
+    # List all activities for a user (dashboard feed)
+    await db.activities.create_index(
+        [("user_id", 1), ("created_at", -1)],
+        background=True,
+        name="idx_activities_user_created"
+    )
+
+    # ── properties collection ──
+    await db.properties.create_index(
+        [("user_id", 1), ("created_at", -1)],
+        background=True,
+        name="idx_properties_user_created"
+    )
+    await db.properties.create_index(
+        [("user_id", 1), ("property_type", 1), ("listing_type", 1)],
+        background=True,
+        name="idx_properties_user_type_listing"
+    )
+
+    # ── templates collection ──
+    await db.templates.create_index(
+        [("user_id", 1), ("category", 1), ("use_count", -1)],
+        background=True,
+        name="idx_templates_user_cat_usecount"
+    )
+
+    # ── api_keys collection ──
+    await db.api_keys.create_index("key", unique=True, background=True)
+    await db.api_keys.create_index("user_id", background=True)
+
+    # ── webhooks collection ──
+    await db.webhooks.create_index(
+        [("user_id", 1), ("active", 1)],
+        background=True,
+        name="idx_webhooks_user_active"
+    )
+
+    logger.info("MongoDB indexes created successfully.")
+
 # ─── Auth Routes ───
 # SECURITY: Strict rate limit on auth endpoints — 10 requests/minute per IP
 @api_router.post("/auth/register")
@@ -535,7 +704,11 @@ async def create_contact(data: ContactCreate, background_tasks: BackgroundTasks,
     return doc
 
 @api_router.get("/contacts")
-async def list_contacts(user=Depends(get_any_auth_user), search: str = "", property_type: str = ""):
+async def list_contacts(
+    user=Depends(get_any_auth_user),
+    search: str = "", property_type: str = "",
+    page: int = 1, limit: int = 50, sort: str = "created_at", order: str = "desc"
+):
     query = {"user_id": user["_id"]}
     if search:
         # SECURITY: Escape regex special characters to prevent ReDoS / injection
@@ -548,8 +721,8 @@ async def list_contacts(user=Depends(get_any_auth_user), search: str = "", prope
         ]
     if property_type:
         query["property_type"] = property_type
-    contacts = await db.contacts.find(query).sort("created_at", -1).to_list(500)
-    return [serialize_doc(c) for c in contacts]
+    sort_order = 1 if order == "asc" else -1
+    return await paginate(db.contacts, query, page=page, limit=limit, sort_field=sort, sort_order=sort_order)
 
 CONTACT_CSV_FIELDS = ["name", "email", "phone", "company", "source", "property_type", "tags", "notes", "lead_score"]
 
@@ -631,14 +804,18 @@ async def create_property(data: PropertyCreate, user=Depends(get_any_auth_user))
     return doc
 
 @api_router.get("/properties")
-async def list_properties(user=Depends(get_any_auth_user), property_type: str = "", listing_type: str = ""):
+async def list_properties(
+    user=Depends(get_any_auth_user),
+    property_type: str = "", listing_type: str = "",
+    page: int = 1, limit: int = 50, sort: str = "created_at", order: str = "desc"
+):
     query = {"user_id": user["_id"]}
     if property_type:
         query["property_type"] = property_type
     if listing_type:
         query["listing_type"] = listing_type
-    props = await db.properties.find(query).sort("created_at", -1).to_list(500)
-    return [serialize_doc(p) for p in props]
+    sort_order = 1 if order == "asc" else -1
+    return await paginate(db.properties, query, page=page, limit=limit, sort_field=sort, sort_order=sort_order)
 
 # ─── Property Import/Export (must be before {property_id} routes) ───
 PROPERTY_CSV_FIELDS = ["name", "address", "property_type", "listing_type", "price", "sqft", "bedrooms", "bathrooms", "status", "description", "image_url"]
@@ -784,12 +961,16 @@ async def create_deal(data: DealCreate, user=Depends(get_any_auth_user)):
     return doc
 
 @api_router.get("/deals")
-async def list_deals(user=Depends(get_any_auth_user), pipeline_type: str = ""):
+async def list_deals(
+    user=Depends(get_any_auth_user),
+    pipeline_type: str = "",
+    page: int = 1, limit: int = 50, sort: str = "created_at", order: str = "desc"
+):
     query = {"user_id": user["_id"]}
     if pipeline_type:
         query["pipeline_type"] = pipeline_type
-    deals = await db.deals.find(query).sort("created_at", -1).to_list(500)
-    return [serialize_doc(d) for d in deals]
+    sort_order = 1 if order == "asc" else -1
+    return await paginate(db.deals, query, page=page, limit=limit, sort_field=sort, sort_order=sort_order)
 
 @api_router.get("/deals/{deal_id}")
 async def get_deal(deal_id: str, user=Depends(get_any_auth_user)):
@@ -858,14 +1039,18 @@ async def create_task(data: TaskCreate, user=Depends(get_any_auth_user)):
     return doc
 
 @api_router.get("/tasks")
-async def list_tasks(user=Depends(get_any_auth_user), completed: str = ""):
+async def list_tasks(
+    user=Depends(get_any_auth_user),
+    completed: str = "",
+    page: int = 1, limit: int = 50, sort: str = "due_date", order: str = "asc"
+):
     query = {"user_id": user["_id"]}
     if completed == "true":
         query["completed"] = True
     elif completed == "false":
         query["completed"] = False
-    tasks = await db.tasks.find(query).sort("due_date", 1).to_list(500)
-    return [serialize_doc(t) for t in tasks]
+    sort_order = 1 if order == "asc" else -1
+    return await paginate(db.tasks, query, page=page, limit=limit, sort_field=sort, sort_order=sort_order)
 
 @api_router.put("/tasks/{task_id}")
 async def update_task(task_id: str, data: dict, user=Depends(get_any_auth_user)):
@@ -896,14 +1081,18 @@ async def create_activity(data: ActivityCreate, user=Depends(get_any_auth_user))
     return doc
 
 @api_router.get("/activities")
-async def list_activities(user=Depends(get_any_auth_user), contact_id: str = "", deal_id: str = ""):
+async def list_activities(
+    user=Depends(get_any_auth_user),
+    contact_id: str = "", deal_id: str = "",
+    page: int = 1, limit: int = 50, sort: str = "created_at", order: str = "desc"
+):
     query = {"user_id": user["_id"]}
     if contact_id:
         query["contact_id"] = contact_id
     if deal_id:
         query["deal_id"] = deal_id
-    activities = await db.activities.find(query).sort("created_at", -1).to_list(200)
-    return [serialize_doc(a) for a in activities]
+    sort_order = 1 if order == "asc" else -1
+    return await paginate(db.activities, query, page=page, limit=limit, sort_field=sort, sort_order=sort_order)
 
 # ─── AI Routes ───
 @api_router.post("/ai/draft-email")
@@ -1091,12 +1280,16 @@ async def create_template(data: TemplateCreate, user=Depends(get_current_user)):
     return doc
 
 @api_router.get("/templates")
-async def list_templates(user=Depends(get_any_auth_user), category: str = ""):
+async def list_templates(
+    user=Depends(get_any_auth_user),
+    category: str = "",
+    page: int = 1, limit: int = 50, sort: str = "use_count", order: str = "desc"
+):
     query = {"user_id": user["_id"]}
     if category:
         query["category"] = category
-    templates = await db.templates.find(query).sort("use_count", -1).to_list(200)
-    return [serialize_doc(t) for t in templates]
+    sort_order = 1 if order == "asc" else -1
+    return await paginate(db.templates, query, page=page, limit=limit, sort_field=sort, sort_order=sort_order)
 
 @api_router.get("/templates/{template_id}")
 async def get_template(template_id: str, user=Depends(get_any_auth_user)):
@@ -1234,9 +1427,8 @@ async def create_webhook(data: WebhookCreate, user=Depends(get_current_user)):
     return doc
 
 @api_router.get("/webhooks")
-async def list_webhooks(user=Depends(get_current_user)):
-    webhooks = await db.webhooks.find({"user_id": user["_id"]}).to_list(50)
-    return [serialize_doc(w) for w in webhooks]
+async def list_webhooks(user=Depends(get_current_user), page: int = 1, limit: int = 50):
+    return await paginate(db.webhooks, {"user_id": user["_id"]}, page=page, limit=limit)
 
 @api_router.delete("/webhooks/{webhook_id}")
 async def delete_webhook(webhook_id: str, user=Depends(get_current_user)):
@@ -1275,18 +1467,25 @@ async def invite_team_member(data: TeamInviteRequest, user=Depends(get_current_u
     return {"email": email, "name": data.name, "role": data.role, "temp_password": temp_password}
 
 @api_router.get("/team/members")
-async def list_team_members(user=Depends(get_current_user)):
+async def list_team_members(user=Depends(get_current_user), page: int = 1, limit: int = 50):
     team_id = user.get("team_id", user["_id"])
-    members = await db.users.find(
-        {"$or": [{"team_id": team_id}, {"_id": ObjectId(user["_id"])}]},
-        {"_id": 1, "email": 1, "name": 1, "role": 1, "created_at": 1}
-    ).to_list(100)
+    query = {"$or": [{"team_id": team_id}, {"_id": ObjectId(user["_id"])}]}
+    # PERFORMANCE: Projection — only return needed fields for team member list
+    projection = {"_id": 1, "email": 1, "name": 1, "role": 1, "created_at": 1}
+    pg = max(1, page)
+    lim = max(1, min(limit, PAGINATION_MAX_LIMIT))
+    skip_count = (pg - 1) * lim
+    total = await db.users.count_documents(query)
+    members = await db.users.find(query, projection).skip(skip_count).limit(lim).to_list(lim)
     result = []
     for m in members:
         m["id"] = str(m["_id"])
         del m["_id"]
         result.append(m)
-    return result
+    return {
+        "data": result,
+        "pagination": {"page": pg, "limit": lim, "total": total, "total_pages": math.ceil(total / lim) if lim > 0 else 1}
+    }
 
 @api_router.delete("/team/members/{member_id}")
 async def remove_team_member(member_id: str, user=Depends(get_current_user)):
@@ -1324,14 +1523,24 @@ async def create_api_key(request: Request, user=Depends(get_current_user)):
     return {"key": key, "name": doc["name"], "created_at": doc["created_at"]}
 
 @api_router.get("/api-keys")
-async def list_api_keys(user=Depends(get_current_user)):
-    keys = await db.api_keys.find({"user_id": user["_id"]}, {"_id": 0, "key": 1, "name": 1, "active": 1, "created_at": 1, "last_used": 1}).to_list(50)
-    # Mask key
+async def list_api_keys(user=Depends(get_current_user), page: int = 1, limit: int = 50):
+    query = {"user_id": user["_id"]}
+    # PERFORMANCE: Projection — only return fields needed for key list
+    projection = {"_id": 0, "key": 1, "name": 1, "active": 1, "created_at": 1, "last_used": 1}
+    pg = max(1, page)
+    lim = max(1, min(limit, PAGINATION_MAX_LIMIT))
+    skip_count = (pg - 1) * lim
+    total = await db.api_keys.count_documents(query)
+    keys = await db.api_keys.find(query, projection).skip(skip_count).limit(lim).to_list(lim)
+    # Mask key for display
     for k in keys:
         k["key_preview"] = k["key"][:8] + "..." + k["key"][-4:]
         k["full_key"] = k["key"]
         del k["key"]
-    return keys
+    return {
+        "data": keys,
+        "pagination": {"page": pg, "limit": lim, "total": total, "total_pages": math.ceil(total / lim) if lim > 0 else 1}
+    }
 
 @api_router.delete("/api-keys/{key_preview}")
 async def delete_api_key(key_preview: str, user=Depends(get_current_user)):
@@ -1344,11 +1553,12 @@ async def delete_api_key(key_preview: str, user=Depends(get_current_user)):
 @api_router.get("/dashboard/stats")
 async def dashboard_stats(user=Depends(get_any_auth_user)):
     uid = user["_id"]
+    # PERFORMANCE: All count_documents queries use indexed user_id field
     total_contacts = await db.contacts.count_documents({"user_id": uid})
     total_deals = await db.deals.count_documents({"user_id": uid})
     total_properties = await db.properties.count_documents({"user_id": uid})
     open_tasks = await db.tasks.count_documents({"user_id": uid, "completed": False})
-    # Pipeline breakdown
+    # Pipeline breakdown — uses idx_deals_user_stage_created index
     pipeline_stats = {}
     for pt in PIPELINE_STAGES:
         stages = {}
@@ -1356,12 +1566,18 @@ async def dashboard_stats(user=Depends(get_any_auth_user)):
             count = await db.deals.count_documents({"user_id": uid, "pipeline_type": pt, "stage": stage})
             stages[stage] = count
         pipeline_stats[pt] = stages
-    # Recent activities
-    recent_activities = await db.activities.find({"user_id": uid}).sort("created_at", -1).to_list(10)
-    # Deal value by pipeline
+    # Recent activities — uses idx_activities_user_created index, limited projection
+    recent_activities = await db.activities.find(
+        {"user_id": uid},
+        {"user_id": 0}  # Exclude user_id from response (already known)
+    ).sort("created_at", -1).to_list(10)
+    # Deal value by pipeline — PERFORMANCE: Only fetch "value" field (projection)
     deal_values = {}
     for pt in PIPELINE_STAGES:
-        deals = await db.deals.find({"user_id": uid, "pipeline_type": pt}).to_list(500)
+        deals = await db.deals.find(
+            {"user_id": uid, "pipeline_type": pt},
+            {"value": 1, "_id": 0}  # Only fetch value field
+        ).to_list(500)
         deal_values[pt] = sum(d.get("value", 0) for d in deals)
     return {
         "total_contacts": total_contacts,
@@ -1376,15 +1592,9 @@ async def dashboard_stats(user=Depends(get_any_auth_user)):
 # ─── Startup ───
 @app.on_event("startup")
 async def startup():
-    await db.users.create_index("email", unique=True)
-    await db.login_attempts.create_index("identifier")
-    await db.contacts.create_index("user_id")
-    await db.deals.create_index([("user_id", 1), ("pipeline_type", 1)])
-    await db.tasks.create_index("user_id")
-    await db.activities.create_index([("user_id", 1), ("contact_id", 1)])
-    await db.api_keys.create_index("key", unique=True)
-    await db.webhooks.create_index("user_id")
-    await db.templates.create_index("user_id")
+    # ── PERFORMANCE: Create comprehensive MongoDB indexes ──
+    await create_mongodb_indexes()
+
     # Seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@propflow.com")
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")

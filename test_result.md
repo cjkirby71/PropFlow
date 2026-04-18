@@ -182,7 +182,7 @@ backend:
 
   - task: "Pydantic model validation"
     implemented: true
-    working: false
+    working: true
     file: "backend/server.py"
     stuck_count: 0
     priority: "high"
@@ -194,10 +194,13 @@ backend:
         - working: false
           agent: "testing"
           comment: "Email validation not working - invalid email 'invalid-email' was accepted and contact created successfully. ContactCreate model email validation is not being enforced."
+        - working: true
+          agent: "testing"
+          comment: "Email validation now working correctly. POST /contacts with invalid email 'bademail' returns 422 status as expected."
 
   - task: "Global exception handler"
     implemented: true
-    working: false
+    working: true
     file: "backend/server.py"
     stuck_count: 0
     priority: "high"
@@ -209,6 +212,9 @@ backend:
         - working: false
           agent: "testing"
           comment: "ObjectId validation causing 500 errors instead of proper 404. GET /contacts/invalid_id returns 500 with bson.errors.InvalidId exception instead of clean 404 error."
+        - working: true
+          agent: "testing"
+          comment: "ObjectId validation now working correctly. GET /contacts/invalid-id returns 404 status as expected."
 
   - task: "Search input regex sanitization"
     implemented: true
@@ -237,21 +243,44 @@ backend:
           agent: "testing"
           comment: "All core CRUD operations working: Contacts (create/read/update/delete), Properties, Deals, Tasks, Activities, Templates. Import/export functionality operational. Dashboard stats working. 31/34 tests passed."
 
+  - task: "Paginated list endpoints regression"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "All list endpoints now return paginated format {data:[...], pagination:{page,limit,total,total_pages}}. Tested: contacts, properties, deals, tasks, activities, templates, webhooks, team/members, api-keys. All pagination parameters working correctly. Dashboard stats correctly remains non-paginated."
+
+  - task: "Pagination params (page, limit, sort, order)"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "Pagination parameters working correctly. Tested page=1&limit=5, page=1&limit=2, sort=name&order=asc. Total pages calculation correct (0 pages when total=0, proper math.ceil calculation otherwise). CRUD operations work with pagination."
+
 metadata:
   created_by: "main_agent"
-  version: "2.0"
-  test_sequence: 3
+  version: "4.0"
+  test_sequence: 5
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "All backend functionality regression test"
+  current_focus: []
   stuck_tasks: []
-  test_all: true
+  test_all: false
   test_priority: "high_first"
 
 agent_communication:
     - agent: "main"
-      message: "Major security hardening. Test ALL existing functionality for regressions. Auth: admin@propflow.com / admin123. Changes: cookies now samesite=strict+secure, rate limit 10/min on auth, all models have field validators, search inputs escaped. Test CRUD on all entities, login/register, templates, imports/exports."
+      message: "Major DB performance upgrade. All list endpoints now return paginated format {data:[...],pagination:{page,limit,total,total_pages}}. Test: 1) GET /contacts?page=1&limit=10 returns pagination metadata, 2) All CRUD still works, 3) /dashboard/stats still works, 4) Email validation now works (fixed), 5) ObjectId validation returns 404 (fixed). Auth: admin@propflow.com / admin123."
     - agent: "testing"
-      message: "Comprehensive backend regression testing completed. 31/34 tests passed (91.2% success rate). Core functionality working: Auth, CRUD operations, import/export, dashboard, rate limiting. Found 3 issues: 1) Permissions-Policy header order mismatch (minor), 2) Email validation not working - invalid emails accepted, 3) ObjectId validation causing 500 errors instead of 404. All critical business functionality operational."
+      message: "Comprehensive pagination regression testing completed. All 19 tests passed (100% success rate). Key findings: 1) All list endpoints correctly return paginated format, 2) Pagination math correct (total_pages=0 when total=0), 3) CRUD operations work with pagination, 4) Dashboard stats correctly non-paginated, 5) Previous fixes verified (email validation 422, ObjectId validation 404), 6) Sorting functionality working. No critical issues found."

@@ -57,7 +57,7 @@ function APIKeysSection() {
 
   const fetchKeys = async () => {
     setLoading(true);
-    try { const { data } = await api.get('/api-keys'); setKeys(data); } catch {}
+    try { const { data } = await api.get('/api-keys'); setKeys(data.data || data); } catch {}
     setLoading(false);
   };
   useEffect(() => { fetchKeys(); }, []);
@@ -130,7 +130,7 @@ function TeamSection({ isAdmin }) {
 
   const fetchMembers = async () => {
     setLoading(true);
-    try { const { data } = await api.get('/team/members'); setMembers(data); } catch {}
+    try { const { data } = await api.get('/team/members'); setMembers(data.data || data); } catch {}
     setLoading(false);
   };
   useEffect(() => { fetchMembers(); }, []);
@@ -233,7 +233,7 @@ function WebhooksSection() {
 
   const fetchWebhooks = async () => {
     setLoading(true);
-    try { const { data } = await api.get('/webhooks'); setWebhooks(data); } catch {}
+    try { const { data } = await api.get('/webhooks'); setWebhooks(data.data || data); } catch {}
     setLoading(false);
   };
   useEffect(() => { fetchWebhooks(); }, []);

@@ -34,7 +34,7 @@ export default function ContactsPage() {
       if (search) params.search = search;
       if (filterType) params.property_type = filterType;
       const { data } = await api.get('/contacts', { params });
-      setContacts(data);
+      setContacts(data.data || data);
     } catch (err) { console.error(err); }
     setLoading(false);
   }, [search, filterType]);

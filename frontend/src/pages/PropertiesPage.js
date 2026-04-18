@@ -25,7 +25,7 @@ export default function PropertiesPage() {
       if (filterPropType) params.property_type = filterPropType;
       if (filterListType) params.listing_type = filterListType;
       const { data } = await api.get('/properties', { params });
-      setProperties(data);
+      setProperties(data.data || data);
     } catch (err) { console.error(err); }
     setLoading(false);
   }, [filterPropType, filterListType]);

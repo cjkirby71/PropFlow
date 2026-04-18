@@ -38,7 +38,7 @@ export default function TemplatesPage() {
       const params = {};
       if (filter !== 'all') params.category = filter;
       const { data } = await api.get('/templates', { params });
-      setTemplates(data);
+      setTemplates(data.data || data);
     } catch (err) { console.error(err); }
     setLoading(false);
   }, [filter]);

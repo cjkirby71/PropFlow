@@ -22,8 +22,8 @@ export default function CalendarPage() {
   const fetchTasks = useCallback(async () => {
     setLoading(true);
     try {
-      const { data } = await api.get('/tasks');
-      setTasks(data);
+      const { data } = await api.get('/tasks', { params: { limit: 500 } });
+      setTasks(data.data || data);
     } catch (err) { console.error(err); }
     setLoading(false);
   }, []);

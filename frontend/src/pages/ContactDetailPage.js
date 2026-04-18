@@ -36,24 +36,26 @@ export default function ContactDetailPage() {
   useEffect(() => {
     Promise.all([
       api.get(`/contacts/${id}`),
-      api.get('/activities', { params: { contact_id: id } }),
-      api.get('/deals'),
-      api.get('/templates', { params: { category: 'email' } }),
-      api.get('/templates', { params: { category: 'sms' } }),
+      api.get('/activities', { params: { contact_id: id, limit: 500 } }),
+      api.get('/deals', { params: { limit: 500 } }),
+      api.get('/templates', { params: { category: 'email', limit: 500 } }),
+      api.get('/templates', { params: { category: 'sms', limit: 500 } }),
     ]).then(([c, a, d, et, st]) => {
       setContact(c.data);
-      setActivities(a.data);
-      setDeals(d.data.filter(deal => deal.contact_id === id));
-      setEmailTemplates(et.data);
-      setSmsTemplates(st.data);
+      const actData = a.data.data || a.data;
+      setActivities(actData);
+      const dealsData = d.data.data || d.data;
+      setDeals(dealsData.filter(deal => deal.contact_id === id));
+      setEmailTemplates(et.data.data || et.data);
+      setSmsTemplates(st.data.data || st.data);
       setLoading(false);
     }).catch(() => { navigate('/contacts'); });
   }, [id, navigate]);
 
   const handleAddActivity = async (actData) => {
     await api.post('/activities', { ...actData, contact_id: id });
-    const { data } = await api.get('/activities', { params: { contact_id: id } });
-    setActivities(data);
+    const { data } = await api.get('/activities', { params: { contact_id: id, limit: 500 } });
+    setActivities(data.data || data);
     setShowActivity(false);
   };
 
@@ -78,8 +80,8 @@ export default function ContactDetailPage() {
       alert('Email sent successfully!');
       setShowSendEmail(false);
       setEmailForm({ subject: '', body: '' });
-      const { data } = await api.get('/activities', { params: { contact_id: id } });
-      setActivities(data);
+      const { data } = await api.get('/activities', { params: { contact_id: id, limit: 500 } });
+      setActivities(data.data || data);
     } catch (err) {
       alert('Send failed: ' + (err.response?.data?.detail || err.message));
     }
@@ -94,8 +96,8 @@ export default function ContactDetailPage() {
       alert('SMS sent successfully!');
       setShowSendSMS(false);
       setSmsForm({ message: '' });
-      const { data } = await api.get('/activities', { params: { contact_id: id } });
-      setActivities(data);
+      const { data } = await api.get('/activities', { params: { contact_id: id, limit: 500 } });
+      setActivities(data.data || data);
     } catch (err) {
       alert('SMS failed: ' + (err.response?.data?.detail || err.message));
     }
