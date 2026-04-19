@@ -130,12 +130,13 @@ export function usePipelineStages() {
   });
 }
 
-export function useDeals(pipelineType = '') {
+export function useDeals(pipelineType = '', scope = '') {
   return useQuery({
-    queryKey: ['deals', { pipelineType }],
+    queryKey: ['deals', { pipelineType, scope }],
     queryFn: async () => {
       const params = { limit: 500 };
       if (pipelineType) params.pipeline_type = pipelineType;
+      if (scope) params.scope = scope;
       const res = await api.get('/deals', { params });
       return unwrap(res);
     },
@@ -705,6 +706,54 @@ export function useSendRenewalOffer(contactId) {
     onSuccess: () => {
       invalidateContact(qc, contactId);
       qc.invalidateQueries({ queryKey: ['activities'] });
+    },
+  });
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 10 — Lease Applications Pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function useLeasePipelineSummary(pipelineType = 'lease_applications', scope = 'me') {
+  return useQuery({
+    queryKey: ['pipeline-summary', { pipelineType, scope }],
+    queryFn: async () => (await api.get('/deals/pipeline-summary', {
+      params: { pipeline_type: pipelineType, scope },
+    })).data,
+    staleTime: 10 * 1000,
+  });
+}
+
+export function useCustomStages(pipelineType = 'lease_applications') {
+  return useQuery({
+    queryKey: ['custom-stages', { pipelineType }],
+    queryFn: async () => (await api.get('/pipeline/custom-stages', {
+      params: { pipeline_type: pipelineType },
+    })).data,
+    staleTime: 60 * 1000,
+  });
+}
+
+export function useAddCustomStage() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ pipeline_type, name }) => api.post('/pipeline/custom-stages', { pipeline_type, name }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['custom-stages'] });
+      qc.invalidateQueries({ queryKey: ['pipeline-summary'] });
+    },
+  });
+}
+
+export function useRemoveCustomStage() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ pipeline_type, name }) =>
+      api.delete(`/pipeline/custom-stages/${pipeline_type}/${encodeURIComponent(name)}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['custom-stages'] });
+      qc.invalidateQueries({ queryKey: ['pipeline-summary'] });
     },
   });
 }

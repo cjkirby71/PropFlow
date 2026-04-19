@@ -529,11 +529,20 @@ class DealCreate(BaseModel):
     property_id: Optional[str] = Field(default="", max_length=50)
     value: Optional[float] = Field(default=0, ge=0)
     notes: Optional[str] = Field(default="", max_length=5000)
+    # ── Phase 10: leasing-focused fields (all optional, backward-compatible) ──
+    unit_number: Optional[str] = Field(default="", max_length=40)
+    unit_address: Optional[str] = Field(default="", max_length=300)
+    desired_rent: Optional[float] = Field(default=0, ge=0)
+    budget_min: Optional[float] = Field(default=0, ge=0)
+    budget_max: Optional[float] = Field(default=0, ge=0)
+    move_in_date: Optional[str] = Field(default="", max_length=20)
+    tags: Optional[List[str]] = Field(default_factory=list)
+    co_applicant_ids: Optional[List[str]] = Field(default_factory=list)
 
     @field_validator("pipeline_type")
     @classmethod
     def validate_pipeline(cls, v):
-        allowed = ("residential_lease", "commercial_sale", "commercial_lease")
+        allowed = ("residential_lease", "commercial_sale", "commercial_lease", "lease_applications")
         if v not in allowed:
             raise ValueError(f"pipeline_type must be one of: {', '.join(allowed)}")
         return v
@@ -545,6 +554,15 @@ class DealUpdate(BaseModel):
     property_id: Optional[str] = Field(default=None, max_length=50)
     value: Optional[float] = Field(default=None, ge=0)
     notes: Optional[str] = Field(default=None, max_length=5000)
+    # ── Phase 10 extensions ──
+    unit_number: Optional[str] = Field(default=None, max_length=40)
+    unit_address: Optional[str] = Field(default=None, max_length=300)
+    desired_rent: Optional[float] = Field(default=None, ge=0)
+    budget_min: Optional[float] = Field(default=None, ge=0)
+    budget_max: Optional[float] = Field(default=None, ge=0)
+    move_in_date: Optional[str] = Field(default=None, max_length=20)
+    tags: Optional[List[str]] = None
+    co_applicant_ids: Optional[List[str]] = None
 
 class TaskCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=300)
@@ -702,6 +720,14 @@ STAGE_AUTO_TASKS = {
     "Lease Signed": {"title": "Process lease paperwork", "priority": "high", "days_offset": 1},
     "Closing": {"title": "Coordinate closing logistics", "priority": "high", "days_offset": 3},
     "Closed": {"title": "Send thank you & request referral", "priority": "low", "days_offset": 2},
+    # ── Lease Applications pipeline (Phase 10) ──
+    "Tour Scheduled": {"title": "Confirm tour time & prep materials", "priority": "high", "days_offset": 0},
+    "Application Submitted": {"title": "Review application & request docs", "priority": "high", "days_offset": 1},
+    "Screening": {"title": "Run credit + background check", "priority": "high", "days_offset": 1},
+    "Approved": {"title": "Send approval letter & prep lease", "priority": "high", "days_offset": 1},
+    "Move-In": {"title": "Schedule move-in inspection + hand keys", "priority": "high", "days_offset": 2},
+    "Active Tenant": {"title": "30-day tenant check-in call", "priority": "medium", "days_offset": 30},
+    "Renewal": {"title": "Send renewal offer & schedule follow-up", "priority": "high", "days_offset": 7},
 }
 
 # ─── Pipeline Stage Definitions ───
@@ -709,6 +735,34 @@ PIPELINE_STAGES = {
     "residential_lease": ["New Lead", "Contacted", "Showing", "Application", "Lease Signed", "Closed"],
     "commercial_sale": ["New Lead", "Contacted", "Tour", "LOI", "Due Diligence", "Closing", "Closed"],
     "commercial_lease": ["New Lead", "Contacted", "Tour", "Proposal", "Negotiation", "Lease Signed", "Closed"],
+    # ── Phase 10: New primary pipeline for residential leasing ──
+    "lease_applications": [
+        "Inquiry", "Tour Scheduled", "Application Submitted", "Screening",
+        "Approved", "Lease Signed", "Move-In", "Active Tenant", "Renewal"
+    ],
+}
+
+# ─── Phase 10: Lease Applications stage colors (for frontend headers) ───
+LEASE_APPLICATIONS_STAGE_COLORS = {
+    "Inquiry":               {"bg": "blue",    "hex": "#3B82F6"},
+    "Tour Scheduled":        {"bg": "cyan",    "hex": "#06B6D4"},
+    "Application Submitted": {"bg": "amber",   "hex": "#F59E0B"},
+    "Screening":             {"bg": "orange",  "hex": "#F97316"},
+    "Approved":              {"bg": "purple",  "hex": "#A855F7"},
+    "Lease Signed":          {"bg": "green",   "hex": "#22C55E"},
+    "Move-In":               {"bg": "emerald", "hex": "#10B981"},
+    "Active Tenant":         {"bg": "teal",    "hex": "#14B8A6"},
+    "Renewal":               {"bg": "indigo",  "hex": "#6366F1"},
+}
+
+# ─── Phase 10: Migration map from old residential_lease stages → new lease_applications stages ───
+LEGACY_STAGE_MAP = {
+    "New Lead":     "Inquiry",
+    "Contacted":    "Inquiry",
+    "Showing":      "Tour Scheduled",
+    "Application":  "Application Submitted",
+    "Lease Signed": "Lease Signed",
+    "Closed":       "Active Tenant",
 }
 
 # ─── Helper ───
@@ -1460,6 +1514,44 @@ async def update_deal(deal_id: str, data: DealUpdate, background_tasks: Backgrou
             "pipeline_type": existing.get("pipeline_type", ""),
             "old_stage": old_stage, "new_stage": new_stage,
         })
+
+        # ─── Phase 10: Auto-enroll contact in any sequence triggered by this stage ───
+        contact_id = existing.get("contact_id", "")
+        if contact_id:
+            try:
+                triggered = await db.sequences.find({
+                    "user_id": user["_id"],
+                    "trigger": "deal_stage_changed",
+                    "trigger_value": new_stage,
+                    "active": True,
+                }).to_list(20)
+                for seq in triggered:
+                    seq_id = seq.get("id") or str(seq.get("_id", ""))
+                    if not seq.get("steps"):
+                        continue
+                    # Skip if already enrolled (idempotent)
+                    already = await db.sequence_executions.find_one({
+                        "sequence_id": seq_id, "contact_id": contact_id, "step_index": 0,
+                    })
+                    if already:
+                        continue
+                    first_step = seq["steps"][0]
+                    scheduled_at = (
+                        datetime.now(timezone.utc)
+                        + timedelta(days=int(first_step.get("delay_days", 0)))
+                    ).isoformat()
+                    await db.sequence_executions.insert_one({
+                        "sequence_id": seq_id,
+                        "contact_id": contact_id,
+                        "step_index": 0,
+                        "status": "pending",
+                        "scheduled_at": scheduled_at,
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "triggered_by": f"stage_change:{new_stage}",
+                    })
+                    logger.info(f"Auto-enrolled contact {contact_id} in sequence '{seq.get('name','')}' via stage→{new_stage}")
+            except Exception as e:
+                logger.error(f"Auto-sequence enrollment failed (non-fatal): {e}")
 
     deal = await db.deals.find_one({"_id": validate_object_id(deal_id, "Deal")})
     return serialize_doc(deal)
@@ -3004,12 +3096,151 @@ async def create_profile_indexes():
         logger.error(f"Profile index creation failed: {e}")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# FEATURE: Lease Applications Pipeline (Phase 10)
+# Appended additively. No existing routes modified.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class CustomStageBody(BaseModel):
+    pipeline_type: str = Field(..., max_length=30)
+    name: str = Field(..., min_length=1, max_length=50)
+
+    @field_validator("pipeline_type")
+    @classmethod
+    def _vpt(cls, v):
+        allowed = ("residential_lease", "commercial_sale", "commercial_lease", "lease_applications")
+        if v not in allowed:
+            raise ValueError(f"pipeline_type must be one of: {', '.join(allowed)}")
+        return v
+
+# ── Pipeline summary with counts + totals per stage ──
+@api_router.get("/deals/pipeline-summary")
+async def pipeline_summary(
+    pipeline_type: str = "lease_applications",
+    scope: str = "me",
+    user=Depends(get_any_auth_user),
+):
+    if pipeline_type not in PIPELINE_STAGES:
+        raise HTTPException(status_code=400, detail="Invalid pipeline_type")
+    query = {"pipeline_type": pipeline_type}
+    if scope != "everyone":
+        query["user_id"] = user["_id"]
+
+    builtin = list(PIPELINE_STAGES[pipeline_type])
+    custom = list((user.get("custom_stages") or {}).get(pipeline_type, []))
+    all_stages = builtin + [c for c in custom if c not in builtin]
+
+    pipeline = [
+        {"$match": query},
+        {"$group": {
+            "_id": "$stage",
+            "count": {"$sum": 1},
+            "total_value": {"$sum": {"$ifNull": ["$desired_rent", {"$ifNull": ["$value", 0]}]}},
+        }},
+    ]
+    cursor = db.deals.aggregate(pipeline)
+    buckets = {}
+    async for row in cursor:
+        buckets[row["_id"]] = row
+
+    stages = []
+    total_value = 0.0
+    total_count = 0
+    for idx, s in enumerate(all_stages):
+        b = buckets.get(s, {"count": 0, "total_value": 0})
+        color = LEASE_APPLICATIONS_STAGE_COLORS.get(s)
+        stages.append({
+            "name": s,
+            "count": int(b["count"]),
+            "total_value": float(b.get("total_value", 0) or 0),
+            "color": color["bg"] if color else "slate",
+            "color_hex": color["hex"] if color else "#64748B",
+            "is_custom": s not in builtin,
+            "order": idx,
+        })
+        total_value += float(b.get("total_value", 0) or 0)
+        total_count += int(b["count"])
+    return {
+        "pipeline_type": pipeline_type,
+        "scope": scope,
+        "stages": stages,
+        "total_pipeline_value": total_value,
+        "total_deals": total_count,
+    }
+
+# ── Custom user-defined stages ──
+@api_router.get("/pipeline/custom-stages")
+async def get_custom_stages(pipeline_type: str = "lease_applications", user=Depends(get_any_auth_user)):
+    if pipeline_type not in PIPELINE_STAGES:
+        raise HTTPException(status_code=400, detail="Invalid pipeline_type")
+    stages = (user.get("custom_stages") or {}).get(pipeline_type, [])
+    return {"pipeline_type": pipeline_type, "stages": stages}
+
+@api_router.post("/pipeline/custom-stages")
+async def add_custom_stage(data: CustomStageBody, user=Depends(get_any_auth_user)):
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Stage name required")
+    if name in PIPELINE_STAGES[data.pipeline_type]:
+        raise HTTPException(status_code=400, detail="Stage already exists as a built-in stage")
+    await db.users.update_one(
+        {"_id": user["_id"]},
+        {"$addToSet": {f"custom_stages.{data.pipeline_type}": name}},
+    )
+    updated = await db.users.find_one({"_id": user["_id"]}, {"custom_stages": 1})
+    return {"stages": (updated.get("custom_stages") or {}).get(data.pipeline_type, [])}
+
+@api_router.delete("/pipeline/custom-stages/{pipeline_type}/{name}")
+async def remove_custom_stage(pipeline_type: str, name: str, user=Depends(get_any_auth_user)):
+    if pipeline_type not in PIPELINE_STAGES:
+        raise HTTPException(status_code=400, detail="Invalid pipeline_type")
+    count = await db.deals.count_documents({
+        "user_id": user["_id"], "pipeline_type": pipeline_type, "stage": name
+    })
+    if count > 0:
+        raise HTTPException(status_code=400, detail=f"Cannot remove stage: {count} deal(s) still in this stage")
+    await db.users.update_one(
+        {"_id": user["_id"]},
+        {"$pull": {f"custom_stages.{pipeline_type}": name}},
+    )
+    return {"message": "Stage removed"}
+
+# ── One-time migration: residential_lease → lease_applications ──
+async def migrate_residential_lease_to_lease_applications():
+    """Move existing residential_lease deals into the new lease_applications pipeline."""
+    try:
+        count = await db.deals.count_documents({"pipeline_type": "residential_lease"})
+        if count == 0:
+            return
+        logger.info(f"[Migration] Found {count} residential_lease deal(s). Migrating to lease_applications…")
+        cursor = db.deals.find({"pipeline_type": "residential_lease"})
+        migrated = 0
+        async for deal in cursor:
+            old_stage = deal.get("stage", "New Lead")
+            new_stage = LEGACY_STAGE_MAP.get(old_stage) or "Inquiry"
+            await db.deals.update_one(
+                {"_id": deal["_id"]},
+                {"$set": {
+                    "pipeline_type": "lease_applications",
+                    "stage": new_stage,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "migrated_from": {"pipeline_type": "residential_lease", "stage": old_stage},
+                }},
+            )
+            migrated += 1
+        logger.info(f"[Migration] Successfully migrated {migrated} deal(s) to lease_applications.")
+    except Exception as e:
+        logger.error(f"[Migration] residential_lease → lease_applications failed: {e}")
+
+
 # ─── Startup ───
 @app.on_event("startup")
 async def startup():
     # ── PERFORMANCE: Create comprehensive MongoDB indexes ──
     await create_mongodb_indexes()
     await create_profile_indexes()
+    # ── Phase 10: one-time migration ──
+    await migrate_residential_lease_to_lease_applications()
 
     # Seed admin
     admin_email = settings.ADMIN_EMAIL
