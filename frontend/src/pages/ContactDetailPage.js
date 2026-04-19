@@ -856,7 +856,7 @@ export default function ContactDetailPage() {
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <button
-            className="fixed bottom-6 right-6 w-14 h-14 rounded-full bg-slate-900 dark:bg-slate-700 text-white shadow-lg hover:bg-slate-800 dark:hover:bg-slate-600 flex items-center justify-center z-40"
+            className="fixed bottom-6 right-6 w-14 h-14 rounded-full bg-slate-900 dark:bg-slate-700 text-white shadow-lg hover:bg-slate-800 dark:hover:bg-slate-600 flex items-center justify-center z-[9999]"
             data-testid="floating-plus-button"
           >
             <Plus className="w-6 h-6" />
