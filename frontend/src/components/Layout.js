@@ -83,25 +83,25 @@ export default function Layout() {
 
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="flex h-screen bg-[#F9FAFB] dark:bg-slate-900 transition-colors duration-200" data-testid="app-layout">
+      <div className="flex h-screen bg-[#F7F9FB] dark:bg-slate-900 transition-colors duration-200" data-testid="app-layout">
         {/* Mobile overlay */}
         {sidebarOpen && (
-          <div className="fixed inset-0 bg-gray-900/40 z-40 md:hidden" onClick={() => setSidebarOpen(false)} />
+          <div className="fixed inset-0 bg-gray-900/50 backdrop-blur-sm z-40 md:hidden" onClick={() => setSidebarOpen(false)} />
         )}
         {/* Sidebar */}
-        <aside className={`fixed md:static inset-y-0 left-0 z-50 w-64 border-r border-slate-200 dark:border-slate-700 bg-[#F3F4F6] dark:bg-slate-800 flex flex-col transition-transform duration-200 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`} data-testid="sidebar">
-          <div className="flex items-center justify-between h-16 px-5 border-b border-slate-200 dark:border-slate-700">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-lg bg-slate-900 dark:bg-slate-100 flex items-center justify-center">
-                <Building2 className="w-4 h-4 text-white dark:text-slate-900" />
+        <aside className={`fixed md:static inset-y-0 left-0 z-50 w-64 border-r border-slate-200 dark:border-slate-700/60 bg-white dark:bg-slate-800/95 backdrop-blur-sm flex flex-col transition-transform duration-200 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`} data-testid="sidebar">
+          <div className="flex items-center justify-between h-[68px] px-5 border-b border-slate-200 dark:border-slate-700/60">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-brand to-teal-700 flex items-center justify-center shadow-premium">
+                <Building2 className="w-4.5 h-4.5 text-white" strokeWidth={2.5} />
               </div>
-              <span className="font-heading text-lg font-bold text-slate-900 dark:text-slate-100 tracking-tight">PropFlow</span>
+              <span className="font-heading text-[18px] font-bold text-slate-900 dark:text-slate-100 tracking-tight">PropFlow</span>
             </div>
             <button className="md:hidden" onClick={() => setSidebarOpen(false)}>
               <X className="w-5 h-5 text-slate-500 dark:text-slate-400" />
             </button>
           </div>
-          <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+          <nav className="flex-1 px-3 py-5 space-y-0.5 overflow-y-auto">
             {navItems.map(({ to, icon: Icon, label }) => (
               <NavLink
                 key={to}
@@ -109,35 +109,42 @@ export default function Layout() {
                 end={to === '/'}
                 onClick={() => setSidebarOpen(false)}
                 className={({ isActive }) =>
-                  `flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
+                  `group relative flex items-center gap-3 px-3 py-2.5 rounded-lg text-[13px] font-medium transition-all duration-200 ${
                     isActive
-                      ? 'bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900'
-                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 hover:text-slate-900 dark:hover:text-slate-100'
+                      ? 'bg-brand/10 text-brand dark:bg-brand/20 dark:text-brand-ring'
+                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700/60 hover:text-slate-900 dark:hover:text-slate-100'
                   }`
                 }
                 data-testid={`sidebar-nav-${label.toLowerCase()}`}
               >
-                <Icon className="w-4.5 h-4.5 flex-shrink-0" />
-                {label}
+                {({ isActive }) => (
+                  <>
+                    {isActive && (
+                      <span className="absolute left-0 top-1/2 -translate-y-1/2 h-6 w-[3px] rounded-r-full bg-brand" aria-hidden="true" />
+                    )}
+                    <Icon className={`w-4.5 h-4.5 flex-shrink-0 transition-transform ${isActive ? 'text-brand dark:text-brand-ring' : 'group-hover:scale-110'}`} strokeWidth={isActive ? 2.5 : 2} />
+                    <span>{label}</span>
+                  </>
+                )}
               </NavLink>
             ))}
           </nav>
-          <div className="px-3 py-4 border-t border-slate-200 dark:border-slate-700">
-            <div className="flex items-center gap-3 px-3 py-2 mb-2">
-              <div className="w-8 h-8 rounded-full bg-slate-900 dark:bg-slate-600 flex items-center justify-center text-white text-xs font-semibold">
+          <div className="px-3 py-4 border-t border-slate-200 dark:border-slate-700/60">
+            <div className="flex items-center gap-3 px-2 py-2 mb-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-700/40 transition-colors">
+              <div className="avatar-ring w-9 h-9 text-[13px]" style={{ fontFamily: "'Cabinet Grotesk', 'IBM Plex Sans', sans-serif" }}>
                 {user?.name?.charAt(0)?.toUpperCase() || 'U'}
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate">{user?.name || 'User'}</p>
-                <p className="text-xs text-slate-500 dark:text-slate-400 truncate">{user?.email}</p>
+                <p className="text-[13px] font-semibold text-slate-900 dark:text-slate-100 truncate">{user?.name || 'User'}</p>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">{user?.email}</p>
               </div>
             </div>
             <button
               onClick={handleLogout}
-              className="flex items-center gap-3 px-3 py-2.5 w-full rounded-md text-sm font-medium text-slate-600 dark:text-slate-400 hover:bg-red-50 dark:hover:bg-red-900/20 hover:text-red-700 dark:hover:text-red-400 transition-colors"
+              className="flex items-center gap-3 px-3 py-2.5 w-full rounded-lg text-[13px] font-medium text-slate-600 dark:text-slate-400 hover:bg-rose-50 dark:hover:bg-rose-900/20 hover:text-rose-700 dark:hover:text-rose-400 transition-all duration-200"
               data-testid="logout-button"
             >
-              <LogOut className="w-4.5 h-4.5" />
+              <LogOut className="w-4.5 h-4.5" strokeWidth={2} />
               Sign Out
             </button>
           </div>
@@ -146,24 +153,24 @@ export default function Layout() {
         {/* Main content */}
         <div className="flex-1 flex flex-col min-w-0">
           {/* Top bar */}
-          <header className="h-16 border-b border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-800/80 backdrop-blur-xl flex items-center px-4 sm:px-6 gap-4 sticky top-0 z-30" data-testid="top-bar">
+          <header className="h-[68px] border-b border-slate-200 dark:border-slate-700/60 bg-white/85 dark:bg-slate-800/85 backdrop-blur-xl flex items-center px-4 sm:px-6 gap-4 sticky top-0 z-30" data-testid="top-bar">
             <button className="md:hidden" onClick={() => setSidebarOpen(true)} data-testid="mobile-menu-toggle">
               <Menu className="w-5 h-5 text-slate-600 dark:text-slate-400" />
             </button>
             <form onSubmit={handleSearch} className="flex-1 max-w-md">
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <div className="relative">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 dark:text-slate-500" />
+                  <div className="relative group">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 dark:text-slate-500 group-focus-within:text-brand transition-colors" />
                     <Input
                       ref={searchRef}
                       placeholder="Search contacts, deals..."
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      className="pl-10 pr-16 bg-slate-50 dark:bg-slate-700 border-slate-200 dark:border-slate-600 h-9 text-sm dark:text-slate-200 dark:placeholder:text-slate-500"
+                      className="pl-10 pr-16 bg-slate-50 dark:bg-slate-700/60 border-slate-200 dark:border-slate-600/70 h-10 text-sm rounded-lg dark:text-slate-200 dark:placeholder:text-slate-500 focus-visible:border-brand focus-visible:ring-2 focus-visible:ring-brand/20"
                       data-testid="global-search-input"
                     />
-                    <kbd className="absolute right-2 top-1/2 -translate-y-1/2 hidden sm:inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-mono font-medium text-slate-400 dark:text-slate-500 bg-slate-100 dark:bg-slate-600 border border-slate-200 dark:border-slate-500 rounded">
+                    <kbd className="absolute right-2 top-1/2 -translate-y-1/2 hidden sm:inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-mono font-medium text-slate-500 dark:text-slate-400 bg-white dark:bg-slate-600/60 border border-slate-200 dark:border-slate-500/60 rounded shadow-sm">
                       {modKey}+K
                     </kbd>
                   </div>
@@ -173,14 +180,14 @@ export default function Layout() {
                 </TooltipContent>
               </Tooltip>
             </form>
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1.5">
               {/* New Contact shortcut hint */}
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
                     variant="ghost"
                     size="sm"
-                    className="text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 gap-1.5 hidden sm:flex"
+                    className="text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 gap-1.5 hidden sm:flex h-9 rounded-lg"
                     onClick={() => navigate('/contacts?new=1')}
                     data-testid="new-contact-shortcut"
                   >
@@ -200,7 +207,7 @@ export default function Layout() {
                     variant="ghost"
                     size="sm"
                     onClick={toggleTheme}
-                    className="h-9 w-9 p-0 text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700"
+                    className="h-9 w-9 p-0 rounded-lg text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 hover:text-brand dark:hover:text-brand-ring"
                     data-testid="dark-mode-toggle"
                   >
                     {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
@@ -211,9 +218,14 @@ export default function Layout() {
                 </TooltipContent>
               </Tooltip>
 
-              <Button variant="ghost" size="sm" className="text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-900/20 gap-1.5" data-testid="ai-assistant-button">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="gap-1.5 h-9 rounded-lg bg-gradient-to-br from-amber-50 to-amber-100 dark:from-amber-900/20 dark:to-amber-900/10 text-amber-700 dark:text-amber-300 hover:from-amber-100 hover:to-amber-200 dark:hover:from-amber-900/30 dark:hover:to-amber-900/20 hover:shadow-sm border border-amber-200/60 dark:border-amber-700/40"
+                data-testid="ai-assistant-button"
+              >
                 <Sparkles className="w-4 h-4" />
-                <span className="hidden sm:inline text-sm">AI</span>
+                <span className="hidden sm:inline text-sm font-semibold">AI</span>
               </Button>
             </div>
           </header>
@@ -222,7 +234,7 @@ export default function Layout() {
             <Outlet />
           </main>
           {/* Mobile Bottom Navigation */}
-          <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white dark:bg-slate-800 border-t border-slate-200 dark:border-slate-700 z-40">
+          <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white/95 dark:bg-slate-800/95 backdrop-blur-xl border-t border-slate-200 dark:border-slate-700/60 z-40 shadow-premium-xl">
             <div className="flex items-center justify-around h-16 px-2">
               {mobileNavItems.map(({ to, icon: Icon, label }) => (
                 <NavLink
@@ -230,15 +242,19 @@ export default function Layout() {
                   to={to}
                   end={to === '/'}
                   className={({ isActive }) =>
-                    `flex flex-col items-center justify-center flex-1 h-full space-y-1 transition-colors ${
+                    `flex flex-col items-center justify-center flex-1 h-full space-y-1 transition-all duration-200 ${
                       isActive
-                        ? 'text-slate-900 dark:text-slate-100'
+                        ? 'text-brand dark:text-brand-ring'
                         : 'text-slate-500 dark:text-slate-400'
                     }`
                   }
                 >
-                  <Icon className="w-5 h-5" />
-                  <span className="text-xs font-medium">{label}</span>
+                  {({ isActive }) => (
+                    <>
+                      <Icon className={`w-5 h-5 ${isActive ? 'scale-110' : ''} transition-transform`} strokeWidth={isActive ? 2.5 : 2} />
+                      <span className="text-[11px] font-semibold">{label}</span>
+                    </>
+                  )}
                 </NavLink>
               ))}
             </div>
