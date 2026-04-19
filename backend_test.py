@@ -12,7 +12,7 @@ import time
 from datetime import datetime
 
 # Backend URL from environment
-BACKEND_URL = "https://drip-sequences.preview.emergentagent.com/api"
+BACKEND_URL = "https://propflow-crm-2.preview.emergentagent.com/api"
 
 # Test credentials
 ADMIN_EMAIL = "admin@propflow.com"
