@@ -480,3 +480,231 @@ export function useApi() {
     updateUserSettingsMutation: useUpdateUserSettings,
   };
 }
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONTACT PROFILE PAGE  (Phase 9 — FUB-parity)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Client types + stage catalog
+export function useClientTypes() {
+  return useQuery({
+    queryKey: ['client-types'],
+    queryFn: async () => (await api.get('/client-types')).data,
+    staleTime: 30 * 60 * 1000,
+  });
+}
+
+// Invalidate helpers
+function invalidateContact(qc, id) {
+  qc.invalidateQueries({ queryKey: ['contacts'] });
+  qc.invalidateQueries({ queryKey: ['contacts', id] });
+}
+
+// ── Photo ──
+export function useUploadContactPhoto(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (photo_url) => api.post(`/contacts/${contactId}/photo`, { photo_url }),
+    onSuccess: () => invalidateContact(qc, contactId),
+  });
+}
+export function useDeleteContactPhoto(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.delete(`/contacts/${contactId}/photo`),
+    onSuccess: () => invalidateContact(qc, contactId),
+  });
+}
+
+// ── Stage ──
+export function useUpdateContactStage(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data) => api.put(`/contacts/${contactId}/stage`, data),
+    onSuccess: () => {
+      invalidateContact(qc, contactId);
+      qc.invalidateQueries({ queryKey: ['activities'] });
+    },
+  });
+}
+
+// ── Tags ──
+export function useAddContactTag(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (tag) => api.post(`/contacts/${contactId}/tags`, { tag }),
+    onSuccess: () => invalidateContact(qc, contactId),
+  });
+}
+export function useRemoveContactTag(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (tag) => api.delete(`/contacts/${contactId}/tags/${encodeURIComponent(tag)}`),
+    onSuccess: () => invalidateContact(qc, contactId),
+  });
+}
+
+// ── Files ──
+export function useContactFiles(contactId) {
+  return useQuery({
+    queryKey: ['contact-files', contactId],
+    queryFn: async () => (await api.get(`/contacts/${contactId}/files`)).data,
+    enabled: !!contactId,
+  });
+}
+export function useUploadContactFile(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload) => api.post(`/contacts/${contactId}/files`, payload),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['contact-files', contactId] }),
+  });
+}
+export function useDeleteContactFile(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (fileId) => api.delete(`/contacts/${contactId}/files/${fileId}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['contact-files', contactId] }),
+  });
+}
+export async function downloadContactFile(contactId, fileId) {
+  return (await api.get(`/contacts/${contactId}/files/${fileId}`)).data;
+}
+
+// ── Lease ──
+export function useContactLease(contactId) {
+  return useQuery({
+    queryKey: ['contact-lease', contactId],
+    queryFn: async () => (await api.get(`/contacts/${contactId}/lease`)).data,
+    enabled: !!contactId,
+  });
+}
+export function useSaveLease(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data) => api.post(`/contacts/${contactId}/lease`, data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['contact-lease', contactId] }),
+  });
+}
+
+// ── Maintenance tickets ──
+export function useMaintenanceTickets(contactId) {
+  return useQuery({
+    queryKey: ['contact-tickets', contactId],
+    queryFn: async () => (await api.get(`/contacts/${contactId}/maintenance`)).data,
+    enabled: !!contactId,
+  });
+}
+export function useCreateTicket(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data) => api.post(`/contacts/${contactId}/maintenance`, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['contact-tickets', contactId] });
+      qc.invalidateQueries({ queryKey: ['activities'] });
+    },
+  });
+}
+export function useUpdateTicket(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }) => api.put(`/contacts/${contactId}/maintenance/${id}`, data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['contact-tickets', contactId] }),
+  });
+}
+export function useDeleteTicket(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id) => api.delete(`/contacts/${contactId}/maintenance/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['contact-tickets', contactId] }),
+  });
+}
+
+// ── Calendar events (per-contact) ──
+export function useContactEvents(contactId) {
+  return useQuery({
+    queryKey: ['contact-events', contactId],
+    queryFn: async () => (await api.get(`/contacts/${contactId}/events`)).data,
+    enabled: !!contactId,
+  });
+}
+export function useCreateEvent(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data) => api.post(`/contacts/${contactId}/events`, data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['contact-events', contactId] }),
+  });
+}
+export function useUpdateEvent(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }) => api.put(`/contacts/${contactId}/events/${id}`, data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['contact-events', contactId] }),
+  });
+}
+export function useDeleteEvent(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id) => api.delete(`/contacts/${contactId}/events/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['contact-events', contactId] }),
+  });
+}
+
+// ── Collaborators ──
+export function useCollaborators(contactId) {
+  return useQuery({
+    queryKey: ['contact-collaborators', contactId],
+    queryFn: async () => (await api.get(`/contacts/${contactId}/collaborators`)).data,
+    enabled: !!contactId,
+  });
+}
+export function useAddCollaborator(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (user_id) => api.post(`/contacts/${contactId}/collaborators`, { user_id }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['contact-collaborators', contactId] }),
+  });
+}
+export function useRemoveCollaborator(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (user_id) => api.delete(`/contacts/${contactId}/collaborators/${user_id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['contact-collaborators', contactId] }),
+  });
+}
+
+// ── AI ──
+export function useAIRetentionSummary(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post('/ai/retention-summary', { contact_id: contactId }),
+    onSuccess: () => invalidateContact(qc, contactId),
+  });
+}
+export function useAIAnalyzeEmailThread(contactId) {
+  return useMutation({
+    mutationFn: () => api.post('/ai/analyze-email-thread', { contact_id: contactId }),
+  });
+}
+
+// ── One-click actions ──
+export function useConvertToTenant(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post(`/contacts/${contactId}/convert-to-tenant`),
+    onSuccess: () => {
+      invalidateContact(qc, contactId);
+      qc.invalidateQueries({ queryKey: ['activities'] });
+    },
+  });
+}
+export function useSendRenewalOffer(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post(`/contacts/${contactId}/send-renewal-offer`),
+    onSuccess: () => {
+      invalidateContact(qc, contactId);
+      qc.invalidateQueries({ queryKey: ['activities'] });
+    },
+  });
+}

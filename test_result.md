@@ -105,6 +105,21 @@
 user_problem_statement: "Quick-Win Improvements: Env validation, dark mode, enhanced CSV import, error boundary, keyboard shortcuts"
 
 backend:
+  - task: "Phase 9: Contact Profile Page — FUB-parity upgrade"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "PHASE 9 — CONTACT PROFILE PAGE FUB-PARITY UPGRADE. Backend adds ~20 new endpoints ALL mounted on api_router, ALL requiring auth (get_any_auth_user), ALL enforcing user_id ownership. NEW COLLECTIONS: contact_files, leases, maintenance_tickets, calendar_events (indexes created at startup). ContactUpdate extended with 10 optional fields (client_type, leasing_stage, stage_updated_at, retention_score, retention_summary, retention_summary_generated_at, photo_url, address, collaborator_ids, is_tenant) — all backward compatible. IMPORTANT: NO existing endpoints changed, NO other pages touched."
+        - working: true
+          agent: "testing"
+          comment: "COMPREHENSIVE PHASE 9 TESTING COMPLETED - ALL 15 TEST CATEGORIES PASSED. Tested all NEW endpoints: (1) ✅ GET /api/client-types - returns 5 types with correct stage counts (leasing_tenant:13, sales_buyer:10, sales_seller:9, commercial:8, other:6). (2) ✅ Contact Photo - upload/delete/validation working correctly. (3) ✅ Contact Stage - valid updates, invalid stage rejection (400), activity logging, client type switching. (4) ✅ Contact Tags - add/remove/idempotent operations. (5) ✅ Contact Files - upload, list (excludes data), detail (includes data), delete. (6) ✅ Contact Lease - empty initial state, create, upsert functionality. (7) ✅ Maintenance Tickets - CRUD operations, activity auto-creation, resolved_at timestamp, priority validation. (8) ✅ Events - full CRUD operations. (9) ✅ Collaborators - add/remove/validation. (10) ✅ AI Retention Summary - generation, 24h caching, contact persistence. (11) ✅ AI Email Analysis - handles no emails, processes email activities. (12) ✅ Convert to Tenant - updates contact fields, logs activity. (13) ✅ Send Renewal Offer - generates draft, updates stage. (14) ✅ Ownership Enforcement - all endpoints return 404 for other user's contacts. (15) ✅ Auth Enforcement - all endpoints require authentication. All endpoints working perfectly with proper validation, error handling, and security."
+
   - task: "Secure auth cookies (environment-aware)"
     implemented: true
     working: true
@@ -240,25 +255,18 @@ frontend:
 
 metadata:
   created_by: "main_agent"
-  version: "8.0"
-  test_sequence: 10
-  run_ui: true
+  version: "9.0"
+  test_sequence: 12
+  run_ui: false
 
 test_plan:
-  current_focus:
-    - "Dark mode toggle on all pages"
-    - "CSV Import flow with detailed error dialog"
-    - "Keyboard shortcuts (Ctrl+K, Ctrl+N)"
-    - "Error boundary"
-    - "Overall responsiveness and dark mode consistency"
+  current_focus: []
   stuck_tasks: []
-  test_all: true
+  test_all: false
   test_priority: "sequential"
 
 agent_communication:
     - agent: "main"
-      message: "FULL FRONTEND TESTING REQUESTED. Auth: admin@propflow.com / admin123. Test ALL 13 pages in both light and dark mode. Key items: 1) Dark mode toggle in top navbar (moon/sun icon) - verify it works and persists across page navigation. 2) CSV import on contacts page - import a CSV file and verify the import result dialog shows structured errors with row/field/reason. 3) Keyboard shortcuts: Ctrl+K should focus search, Ctrl+N should open new contact dialog. 4) Error boundary is wrapping the app. 5) Check all pages: Dashboard, Contacts, Pipeline (Kanban), Properties, Tasks, Sequences, Analytics, Calendar, Templates, Settings, ContactDetail. Look for dark mode coverage issues."
+      message: "PHASE 9 — CONTACT PROFILE PAGE FUB-PARITY UPGRADE. Backend adds ~20 new endpoints ALL mounted on api_router, ALL requiring auth (get_any_auth_user), ALL enforcing user_id ownership. NEW COLLECTIONS: contact_files, leases, maintenance_tickets, calendar_events (indexes created at startup). ContactUpdate extended with 10 optional fields (client_type, leasing_stage, stage_updated_at, retention_score, retention_summary, retention_summary_generated_at, photo_url, address, collaborator_ids, is_tenant) — all backward compatible. IMPORTANT: NO existing endpoints changed, NO other pages touched. Please test the following NEW endpoints with admin@propflow.com / admin123: (1) GET /api/client-types — returns types + stages dict. (2) POST /api/contacts/{id}/photo — accepts base64 data URL; GET /api/contacts/{id} should show photo_url. (3) PUT /api/contacts/{id}/stage — body: {leasing_stage, client_type?}; must validate stage belongs to client_type's list, must reject invalid stage (e.g. send 'Bogus Stage' → 400). (4) POST /api/contacts/{id}/tags body {tag} and DELETE /api/contacts/{id}/tags/{tag} — verify tags array updates. (5) Files: POST /api/contacts/{id}/files (name, mime_type, category, data=base64, size), GET list (should NOT return data field), GET /api/contacts/{id}/files/{fid} (SHOULD return data field for download), DELETE. (6) Lease: POST /api/contacts/{id}/lease upserts single active lease; GET returns {current, history}. (7) Maintenance: POST + GET list + PUT status=resolved (should set resolved_at) + DELETE. Also verify creating a ticket auto-creates an activity. (8) Events: CRUD on /api/contacts/{id}/events. (9) Collaborators: POST /api/contacts/{id}/collaborators with user_id of an existing user; GET returns populated list. (10) AI: POST /api/ai/retention-summary — first call generates, caches for 24h; second call should return cached:true. POST /api/ai/analyze-email-thread — returns analysis text (if no emails, returns 'No email history found'). (11) POST /api/contacts/{id}/convert-to-tenant — flips is_tenant=true, client_type=leasing_tenant, stage=Active Tenant, logs activity. (12) POST /api/contacts/{id}/send-renewal-offer — returns draft, flips stage to Renewal Offered. Verify all endpoints enforce ownership (404 for other user's contact). Verify validation errors (422) on bad inputs. Please run comprehensive tests and report each endpoint."
     - agent: "testing"
-      message: "Comprehensive backend testing completed successfully. All quick-win improvements working. Backend is production-ready."
-    - agent: "testing"
-      message: "FULL FRONTEND TESTING COMPLETED. All quick-win improvements are working correctly. Dark mode: ✅ Toggle works, persists to localStorage, persists after refresh, consistent across all 10 pages (Dashboard, Contacts, Pipeline, Properties, Tasks, Sequences, Analytics, Calendar, Templates, Settings). CSV Import: ✅ Template download button present, import dialog shows structured results (Imported: 3, Skipped: 1, Total Rows: 4) with detailed error messages (Row 4, field: email, reason: Invalid email format). Keyboard shortcuts: ✅ Ctrl+K focuses search input, Ctrl+N button click opens add contact dialog (note: Ctrl+N keyboard press cannot be tested via Playwright as browser intercepts it, but functionality is correctly implemented). Error boundary: ✅ Not triggered, app loads successfully. Mobile: ✅ Mobile menu toggle visible, bottom nav present. Visual regression: ✅ Captured screenshots of key pages in both modes - all styling correct. NO CRITICAL ISSUES FOUND. All features production-ready."
+      message: "PHASE 9 BACKEND TESTING COMPLETED SUCCESSFULLY - ALL 15 TEST CATEGORIES PASSED. Comprehensive testing of all new Contact Profile Page endpoints completed with 100% success rate (19/19 tests passed). All endpoints working correctly with proper authentication, authorization, validation, and error handling. Key findings: (1) Client Types API returns correct structure with 5 types and proper stage counts. (2) Photo upload/delete with proper validation. (3) Stage management with validation and activity logging. (4) Tag operations are idempotent. (5) File management with proper data exclusion/inclusion. (6) Lease upsert functionality working. (7) Maintenance tickets with auto-activity creation. (8) Events CRUD operations. (9) Collaborator management. (10) AI retention summary with 24h caching. (11) AI email analysis handling. (12) Convert to tenant functionality. (13) Renewal offer generation. (14) Ownership enforcement (404 for unauthorized access). (15) Authentication enforcement. All new collections (contact_files, leases, maintenance_tickets, calendar_events) working properly. No issues found. Ready for production use."

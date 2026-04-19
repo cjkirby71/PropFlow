@@ -475,6 +475,17 @@ class ContactUpdate(BaseModel):
     property_type: Optional[str] = Field(default=None, max_length=50)
     notes: Optional[str] = Field(default=None, max_length=5000)
     lead_score: Optional[int] = Field(default=None, ge=0, le=100)
+    # ── Profile-page extensions (all optional, backward-compatible) ──
+    client_type: Optional[str] = Field(default=None, max_length=30)
+    leasing_stage: Optional[str] = Field(default=None, max_length=50)
+    stage_updated_at: Optional[str] = Field(default=None, max_length=50)
+    retention_score: Optional[int] = Field(default=None, ge=0, le=100)
+    retention_summary: Optional[str] = Field(default=None, max_length=5000)
+    retention_summary_generated_at: Optional[str] = Field(default=None, max_length=50)
+    photo_url: Optional[str] = Field(default=None, max_length=2_500_000)
+    address: Optional[str] = Field(default=None, max_length=500)
+    collaborator_ids: Optional[List[str]] = None
+    is_tenant: Optional[bool] = None
 
 class PropertyCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=300)
@@ -2333,11 +2344,672 @@ async def calendar_sync(user=Depends(get_current_user)):
     """
     return {"status": "not_implemented", "message": "Google Calendar sync not yet configured. Complete OAuth integration first."}
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# FEATURE: Contact/Tenant Profile Page — FUB-parity endpoints
+# Appended additively. No existing routes modified. All endpoints require auth
+# and enforce user_id ownership. New collections:
+#   contact_files · leases · maintenance_tickets · calendar_events
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Client Type + Stage catalogs ──
+CLIENT_TYPES = ("leasing_tenant", "sales_buyer", "sales_seller", "commercial", "other")
+CLIENT_TYPE_STAGES = {
+    "leasing_tenant": [
+        "Inquiry", "Tour Scheduled", "Application Submitted", "Screening",
+        "Approved", "Lease Signed", "Move-In", "Active Tenant",
+        "Renewal Due", "Renewal Offered", "Renewed", "Vacating", "Past Tenant"
+    ],
+    "sales_buyer": [
+        "Inquiry", "Consultation", "Pre-Approved", "Showing",
+        "Offer Submitted", "Under Contract", "Inspection", "Closing",
+        "Closed Won", "Closed Lost"
+    ],
+    "sales_seller": [
+        "Inquiry", "Consultation", "Listing Prep", "Active Listing",
+        "Offer Received", "Under Contract", "Closing", "Sold", "Withdrawn"
+    ],
+    "commercial": [
+        "Inquiry", "Tour", "LOI", "Due Diligence",
+        "Negotiation", "Contract", "Closing", "Closed"
+    ],
+    "other": ["Prospect", "Contacted", "Qualified", "Nurturing", "Converted", "Lost"],
+}
+
+# ── Pydantic models (profile page only) ──
+class ContactPhotoUpload(BaseModel):
+    photo_url: str = Field(..., min_length=10, max_length=2_500_000)  # data:image/...;base64,...
+
+    @field_validator("photo_url")
+    @classmethod
+    def _validate_data_url(cls, v):
+        if not (v.startswith("data:image/") or v.startswith("http://") or v.startswith("https://")):
+            raise ValueError("photo_url must be an http(s) URL or data:image/...;base64 URL")
+        return v
+
+class ContactStageUpdate(BaseModel):
+    leasing_stage: str = Field(..., min_length=1, max_length=50)
+    client_type: Optional[str] = Field(default=None, max_length=30)
+
+    @field_validator("client_type")
+    @classmethod
+    def _validate_ct(cls, v):
+        if v is not None and v not in CLIENT_TYPES:
+            raise ValueError(f"client_type must be one of: {', '.join(CLIENT_TYPES)}")
+        return v
+
+class TagBody(BaseModel):
+    tag: str = Field(..., min_length=1, max_length=50)
+
+class FileUploadBody(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    mime_type: Optional[str] = Field(default="application/octet-stream", max_length=100)
+    category: Optional[str] = Field(default="general", max_length=30)  # lease, inspection, id_doc, maintenance, general
+    data: str = Field(..., min_length=10, max_length=14_000_000)  # base64 (~10 MB raw)
+    size: Optional[int] = Field(default=0, ge=0)
+
+class LeaseBody(BaseModel):
+    property_id: Optional[str] = Field(default="", max_length=50)
+    unit: Optional[str] = Field(default="", max_length=100)
+    monthly_rent: Optional[float] = Field(default=0, ge=0)
+    security_deposit: Optional[float] = Field(default=0, ge=0)
+    lease_start: Optional[str] = Field(default="", max_length=20)
+    lease_end: Optional[str] = Field(default="", max_length=20)
+    move_in_date: Optional[str] = Field(default="", max_length=20)
+    lease_term_months: Optional[int] = Field(default=12, ge=0, le=600)
+    status: Optional[str] = Field(default="active", max_length=20)
+    notes: Optional[str] = Field(default="", max_length=5000)
+
+class MaintenanceBody(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = Field(default="", max_length=5000)
+    priority: Optional[str] = Field(default="medium", max_length=10)
+    status: Optional[str] = Field(default="open", max_length=20)
+    category: Optional[str] = Field(default="general", max_length=40)
+
+    @field_validator("priority")
+    @classmethod
+    def _vp(cls, v):
+        if v and v not in ("high", "medium", "low"):
+            raise ValueError("priority must be 'high', 'medium', or 'low'")
+        return v
+
+    @field_validator("status")
+    @classmethod
+    def _vs(cls, v):
+        if v and v not in ("open", "in_progress", "resolved", "closed"):
+            raise ValueError("status must be 'open', 'in_progress', 'resolved', or 'closed'")
+        return v
+
+class MaintenanceUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=5000)
+    priority: Optional[str] = Field(default=None, max_length=10)
+    status: Optional[str] = Field(default=None, max_length=20)
+    category: Optional[str] = Field(default=None, max_length=40)
+
+class EventBody(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = Field(default="", max_length=5000)
+    start: str = Field(..., min_length=1, max_length=40)  # ISO datetime
+    end: Optional[str] = Field(default="", max_length=40)
+    location: Optional[str] = Field(default="", max_length=300)
+    event_type: Optional[str] = Field(default="meeting", max_length=30)
+
+class EventUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=5000)
+    start: Optional[str] = Field(default=None, max_length=40)
+    end: Optional[str] = Field(default=None, max_length=40)
+    location: Optional[str] = Field(default=None, max_length=300)
+    event_type: Optional[str] = Field(default=None, max_length=30)
+
+class CollaboratorBody(BaseModel):
+    user_id: str = Field(..., min_length=1, max_length=50)
+
+class AIContactIdBody(BaseModel):
+    contact_id: str = Field(..., max_length=50)
+
+# ── Helper: ensure contact exists + owned by user (returns contact dict) ──
+async def _owned_contact(contact_id: str, user) -> dict:
+    c = await db.contacts.find_one({
+        "_id": validate_object_id(contact_id, "Contact"),
+        "user_id": user["_id"],
+    })
+    if not c:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    return c
+
+# ── Client types / stages reference ──
+@api_router.get("/client-types")
+async def list_client_types(user=Depends(get_any_auth_user)):
+    return {
+        "types": [
+            {"value": "leasing_tenant", "label": "Leasing / Tenant"},
+            {"value": "sales_buyer", "label": "Sales / Buyer"},
+            {"value": "sales_seller", "label": "Sales / Seller"},
+            {"value": "commercial", "label": "Commercial"},
+            {"value": "other", "label": "Other / Prospect"},
+        ],
+        "stages": CLIENT_TYPE_STAGES,
+    }
+
+# ── Avatar upload (base64 on contact doc) ──
+@api_router.post("/contacts/{contact_id}/photo")
+async def upload_contact_photo(contact_id: str, data: ContactPhotoUpload, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    await db.contacts.update_one(
+        {"_id": validate_object_id(contact_id, "Contact")},
+        {"$set": {"photo_url": data.photo_url, "updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    return {"photo_url": data.photo_url}
+
+@api_router.delete("/contacts/{contact_id}/photo")
+async def delete_contact_photo(contact_id: str, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    await db.contacts.update_one(
+        {"_id": validate_object_id(contact_id, "Contact")},
+        {"$unset": {"photo_url": ""}, "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    return {"message": "Photo removed"}
+
+# ── Stage update (w/ timestamp + activity log) ──
+@api_router.put("/contacts/{contact_id}/stage")
+async def update_contact_stage(contact_id: str, data: ContactStageUpdate, user=Depends(get_any_auth_user)):
+    c = await _owned_contact(contact_id, user)
+    client_type = data.client_type or c.get("client_type") or "leasing_tenant"
+    if client_type not in CLIENT_TYPES:
+        raise HTTPException(status_code=400, detail="Invalid client_type")
+    if data.leasing_stage not in CLIENT_TYPE_STAGES[client_type]:
+        raise HTTPException(status_code=400, detail=f"Stage '{data.leasing_stage}' not valid for {client_type}")
+    now = datetime.now(timezone.utc).isoformat()
+    update_doc = {
+        "leasing_stage": data.leasing_stage,
+        "stage_updated_at": now,
+        "updated_at": now,
+    }
+    if data.client_type:
+        update_doc["client_type"] = data.client_type
+    await db.contacts.update_one({"_id": validate_object_id(contact_id, "Contact")}, {"$set": update_doc})
+    # Log as activity
+    await db.activities.insert_one({
+        "contact_id": contact_id, "user_id": user["_id"],
+        "activity_type": "note",
+        "description": f"Stage changed from '{c.get('leasing_stage','—')}' to '{data.leasing_stage}'",
+        "created_at": now,
+    })
+    return {"leasing_stage": data.leasing_stage, "client_type": client_type, "stage_updated_at": now}
+
+# ── Tags add / remove ──
+@api_router.post("/contacts/{contact_id}/tags")
+async def add_contact_tag(contact_id: str, data: TagBody, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    await db.contacts.update_one(
+        {"_id": validate_object_id(contact_id, "Contact")},
+        {"$addToSet": {"tags": data.tag}, "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    c = await db.contacts.find_one({"_id": validate_object_id(contact_id, "Contact")})
+    return {"tags": c.get("tags", [])}
+
+@api_router.delete("/contacts/{contact_id}/tags/{tag}")
+async def remove_contact_tag(contact_id: str, tag: str, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    await db.contacts.update_one(
+        {"_id": validate_object_id(contact_id, "Contact")},
+        {"$pull": {"tags": tag}, "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    c = await db.contacts.find_one({"_id": validate_object_id(contact_id, "Contact")})
+    return {"tags": c.get("tags", [])}
+
+# ── Files ──
+@api_router.get("/contacts/{contact_id}/files")
+async def list_contact_files(contact_id: str, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    cursor = db.contact_files.find(
+        {"contact_id": contact_id, "user_id": user["_id"]},
+        {"data": 0},  # exclude bytes in listing
+    ).sort("created_at", -1)
+    items = await cursor.to_list(500)
+    return [serialize_doc(x) for x in items]
+
+@api_router.post("/contacts/{contact_id}/files")
+async def upload_contact_file(contact_id: str, data: FileUploadBody, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    doc = {
+        "contact_id": contact_id,
+        "user_id": user["_id"],
+        "name": data.name,
+        "mime_type": data.mime_type or "application/octet-stream",
+        "category": data.category or "general",
+        "size": data.size or len(data.data),
+        "data": data.data,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    result = await db.contact_files.insert_one(doc)
+    doc["id"] = str(result.inserted_id)
+    del doc["_id"]
+    del doc["data"]
+    return doc
+
+@api_router.get("/contacts/{contact_id}/files/{file_id}")
+async def download_contact_file(contact_id: str, file_id: str, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    f = await db.contact_files.find_one({
+        "_id": validate_object_id(file_id, "File"),
+        "contact_id": contact_id, "user_id": user["_id"],
+    })
+    if not f:
+        raise HTTPException(status_code=404, detail="File not found")
+    return {
+        "id": str(f["_id"]), "name": f.get("name", ""),
+        "mime_type": f.get("mime_type", "application/octet-stream"),
+        "category": f.get("category", "general"),
+        "size": f.get("size", 0),
+        "data": f.get("data", ""),
+        "created_at": f.get("created_at", ""),
+    }
+
+@api_router.delete("/contacts/{contact_id}/files/{file_id}")
+async def delete_contact_file(contact_id: str, file_id: str, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    result = await db.contact_files.delete_one({
+        "_id": validate_object_id(file_id, "File"),
+        "contact_id": contact_id, "user_id": user["_id"],
+    })
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="File not found")
+    return {"message": "File deleted"}
+
+# ── Lease info (1 active lease per contact; renewal history preserved) ──
+@api_router.get("/contacts/{contact_id}/lease")
+async def get_contact_lease(contact_id: str, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    lease = await db.leases.find_one({"contact_id": contact_id, "user_id": user["_id"]})
+    history_cursor = db.leases.find(
+        {"contact_id": contact_id, "user_id": user["_id"], "status": {"$in": ["expired", "renewed", "terminated"]}}
+    ).sort("lease_end", -1)
+    history = [serialize_doc(h) for h in await history_cursor.to_list(50)]
+    return {
+        "current": serialize_doc(lease) if lease else None,
+        "history": history,
+    }
+
+@api_router.post("/contacts/{contact_id}/lease")
+async def create_or_update_lease(contact_id: str, data: LeaseBody, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    payload = data.model_dump()
+    payload["contact_id"] = contact_id
+    payload["user_id"] = user["_id"]
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    existing = await db.leases.find_one({"contact_id": contact_id, "user_id": user["_id"], "status": "active"})
+    if existing:
+        await db.leases.update_one({"_id": existing["_id"]}, {"$set": payload})
+        doc = await db.leases.find_one({"_id": existing["_id"]})
+        return serialize_doc(doc)
+    payload["created_at"] = payload["updated_at"]
+    result = await db.leases.insert_one(payload)
+    payload["id"] = str(result.inserted_id)
+    del payload["_id"]
+    return payload
+
+@api_router.put("/contacts/{contact_id}/lease/{lease_id}")
+async def update_lease(contact_id: str, lease_id: str, data: LeaseBody, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    updates = {k: v for k, v in data.model_dump().items() if v is not None}
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    result = await db.leases.update_one(
+        {"_id": validate_object_id(lease_id, "Lease"), "contact_id": contact_id, "user_id": user["_id"]},
+        {"$set": updates},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Lease not found")
+    doc = await db.leases.find_one({"_id": validate_object_id(lease_id, "Lease")})
+    return serialize_doc(doc)
+
+# ── Maintenance Tickets ──
+@api_router.get("/contacts/{contact_id}/maintenance")
+async def list_maintenance(contact_id: str, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    cursor = db.maintenance_tickets.find({"contact_id": contact_id, "user_id": user["_id"]}).sort("created_at", -1)
+    items = await cursor.to_list(500)
+    return [serialize_doc(x) for x in items]
+
+@api_router.post("/contacts/{contact_id}/maintenance")
+async def create_maintenance(contact_id: str, data: MaintenanceBody, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    now = datetime.now(timezone.utc).isoformat()
+    doc = data.model_dump()
+    doc["contact_id"] = contact_id
+    doc["user_id"] = user["_id"]
+    doc["created_at"] = now
+    doc["updated_at"] = now
+    result = await db.maintenance_tickets.insert_one(doc)
+    doc["id"] = str(result.inserted_id)
+    del doc["_id"]
+    # Also log as activity
+    await db.activities.insert_one({
+        "contact_id": contact_id, "user_id": user["_id"],
+        "activity_type": "note",
+        "description": f"Maintenance ticket opened: {data.title} ({data.priority})",
+        "created_at": now,
+    })
+    return doc
+
+@api_router.put("/contacts/{contact_id}/maintenance/{ticket_id}")
+async def update_maintenance(contact_id: str, ticket_id: str, data: MaintenanceUpdate, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    updates = {k: v for k, v in data.model_dump().items() if v is not None}
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    if updates.get("status") in ("resolved", "closed"):
+        updates["resolved_at"] = updates["updated_at"]
+    result = await db.maintenance_tickets.update_one(
+        {"_id": validate_object_id(ticket_id, "Ticket"), "contact_id": contact_id, "user_id": user["_id"]},
+        {"$set": updates},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    doc = await db.maintenance_tickets.find_one({"_id": validate_object_id(ticket_id, "Ticket")})
+    return serialize_doc(doc)
+
+@api_router.delete("/contacts/{contact_id}/maintenance/{ticket_id}")
+async def delete_maintenance(contact_id: str, ticket_id: str, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    r = await db.maintenance_tickets.delete_one({
+        "_id": validate_object_id(ticket_id, "Ticket"),
+        "contact_id": contact_id, "user_id": user["_id"],
+    })
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return {"message": "Ticket deleted"}
+
+# ── Calendar events (per-contact) ──
+@api_router.get("/contacts/{contact_id}/events")
+async def list_events(contact_id: str, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    cursor = db.calendar_events.find({"contact_id": contact_id, "user_id": user["_id"]}).sort("start", 1)
+    items = await cursor.to_list(500)
+    return [serialize_doc(x) for x in items]
+
+@api_router.post("/contacts/{contact_id}/events")
+async def create_event(contact_id: str, data: EventBody, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    doc = data.model_dump()
+    doc["contact_id"] = contact_id
+    doc["user_id"] = user["_id"]
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    result = await db.calendar_events.insert_one(doc)
+    doc["id"] = str(result.inserted_id)
+    del doc["_id"]
+    return doc
+
+@api_router.put("/contacts/{contact_id}/events/{event_id}")
+async def update_event(contact_id: str, event_id: str, data: EventUpdate, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    updates = {k: v for k, v in data.model_dump().items() if v is not None}
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    result = await db.calendar_events.update_one(
+        {"_id": validate_object_id(event_id, "Event"), "contact_id": contact_id, "user_id": user["_id"]},
+        {"$set": updates},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Event not found")
+    doc = await db.calendar_events.find_one({"_id": validate_object_id(event_id, "Event")})
+    return serialize_doc(doc)
+
+@api_router.delete("/contacts/{contact_id}/events/{event_id}")
+async def delete_event(contact_id: str, event_id: str, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    r = await db.calendar_events.delete_one({
+        "_id": validate_object_id(event_id, "Event"),
+        "contact_id": contact_id, "user_id": user["_id"],
+    })
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Event not found")
+    return {"message": "Event deleted"}
+
+# ── Collaborators (references to team users) ──
+@api_router.get("/contacts/{contact_id}/collaborators")
+async def list_collaborators(contact_id: str, user=Depends(get_any_auth_user)):
+    c = await _owned_contact(contact_id, user)
+    ids = c.get("collaborator_ids", []) or []
+    users = []
+    for uid in ids:
+        try:
+            u = await db.users.find_one({"_id": ObjectId(uid)}, {"password_hash": 0})
+            if u:
+                users.append({"id": str(u["_id"]), "name": u.get("name", ""), "email": u.get("email", ""), "role": u.get("role", "agent")})
+        except Exception:
+            continue
+    return users
+
+@api_router.post("/contacts/{contact_id}/collaborators")
+async def add_collaborator(contact_id: str, data: CollaboratorBody, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    # Validate user exists
+    try:
+        u = await db.users.find_one({"_id": ObjectId(data.user_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+    await db.contacts.update_one(
+        {"_id": validate_object_id(contact_id, "Contact")},
+        {"$addToSet": {"collaborator_ids": data.user_id},
+         "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    return {"id": data.user_id, "name": u.get("name", ""), "email": u.get("email", ""), "role": u.get("role", "agent")}
+
+@api_router.delete("/contacts/{contact_id}/collaborators/{user_id}")
+async def remove_collaborator(contact_id: str, user_id: str, user=Depends(get_any_auth_user)):
+    await _owned_contact(contact_id, user)
+    await db.contacts.update_one(
+        {"_id": validate_object_id(contact_id, "Contact")},
+        {"$pull": {"collaborator_ids": user_id}},
+    )
+    return {"message": "Collaborator removed"}
+
+# ── AI: Retention Summary (cached 24h) ──
+@api_router.post("/ai/retention-summary")
+async def ai_retention_summary(data: AIContactIdBody, user=Depends(get_any_auth_user)):
+    contact = await _owned_contact(data.contact_id, user)
+    # Return cached summary if fresh (< 24h)
+    cached_at = contact.get("retention_summary_generated_at")
+    if cached_at and contact.get("retention_summary"):
+        try:
+            gen_dt = datetime.fromisoformat(cached_at.replace("Z", "+00:00"))
+            if (datetime.now(timezone.utc) - gen_dt) < timedelta(hours=24):
+                return {
+                    "summary": contact.get("retention_summary", ""),
+                    "retention_score": contact.get("retention_score", 50),
+                    "generated_at": cached_at,
+                    "cached": True,
+                }
+        except Exception:
+            pass
+    await check_ai_rate_limit(user["_id"])
+    activities = await db.activities.find({"contact_id": data.contact_id}).sort("created_at", -1).to_list(30)
+    tickets = await db.maintenance_tickets.find({"contact_id": data.contact_id}).to_list(20)
+    lease = await db.leases.find_one({"contact_id": data.contact_id, "status": "active"})
+    act_text = "\n".join([f"- [{a.get('activity_type','')}] {a.get('description','')}" for a in activities]) or "None"
+    tick_text = "\n".join([f"- {t.get('title','')} ({t.get('priority','')}, {t.get('status','')})" for t in tickets]) or "None"
+    lease_text = (f"Rent ${lease.get('monthly_rent',0)}/mo, unit {lease.get('unit','')}, "
+                  f"ends {lease.get('lease_end','')}") if lease else "No active lease on record"
+    system_msg = f"""You are a tenant-retention AI analyst for a residential leasing CRM.
+Analyze this tenant and return a concise retention assessment.
+
+TENANT: {contact.get('name','')}
+STAGE: {contact.get('leasing_stage','Inquiry')}
+LEASE: {lease_text}
+RECENT ACTIVITIES (newest first):
+{act_text}
+MAINTENANCE TICKETS:
+{tick_text}
+
+Respond ONLY with valid JSON:
+{{"retention_score": <0-100 int>, "summary": "<one concise paragraph, 2-4 sentences, focused on renewal likelihood & action>"}}"""
+    guard_ai_cost(system_msg)
+    input_tokens = estimate_tokens(system_msg)
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        chat = LlmChat(
+            api_key=settings.EMERGENT_LLM_KEY,
+            session_id=f"retention-{data.contact_id}-{datetime.now(timezone.utc).isoformat()}",
+            system_message=system_msg,
+        ).with_model("openai", "gpt-5.2")
+        msg = UserMessage(text="Analyze this tenant's retention outlook now.")
+        result = await chat.send_message(msg)
+        output_tokens = estimate_tokens(result)
+        await log_ai_usage(user["_id"], "retention-summary", input_tokens, output_tokens)
+        cleaned = result.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        try:
+            parsed = json.loads(cleaned)
+            score = int(parsed.get("retention_score", 50))
+            summary = parsed.get("summary", result)
+        except Exception:
+            score = 50
+            summary = result
+        now_iso = datetime.now(timezone.utc).isoformat()
+        await db.contacts.update_one(
+            {"_id": validate_object_id(data.contact_id, "Contact")},
+            {"$set": {
+                "retention_score": score,
+                "retention_summary": summary,
+                "retention_summary_generated_at": now_iso,
+            }},
+        )
+        return {"summary": summary, "retention_score": score, "generated_at": now_iso, "cached": False}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Retention AI error: {e}")
+        raise HTTPException(status_code=500, detail="AI service temporarily unavailable. Please try again.")
+
+# ── AI: Analyze Email Thread ──
+@api_router.post("/ai/analyze-email-thread")
+async def ai_analyze_email_thread(data: AIContactIdBody, user=Depends(get_any_auth_user)):
+    await _owned_contact(data.contact_id, user)
+    await check_ai_rate_limit(user["_id"])
+    emails = await db.activities.find({
+        "contact_id": data.contact_id,
+        "activity_type": "email",
+    }).sort("created_at", -1).to_list(50)
+    if not emails:
+        return {"analysis": "No email history found for this contact."}
+    email_text = "\n".join([f"[{e.get('created_at','')}] {e.get('description','')}" for e in emails])
+    system_msg = """You analyze email conversations for a real estate CRM.
+Summarize sentiment, key pain points, unanswered questions, and recommended next action.
+Be concise, 3-5 bullet points plus one-line recommendation."""
+    full_input = system_msg + f"\nEmails:\n{email_text}"
+    guard_ai_cost(full_input)
+    input_tokens = estimate_tokens(full_input)
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        chat = LlmChat(
+            api_key=settings.EMERGENT_LLM_KEY,
+            session_id=f"email-analyze-{data.contact_id}-{datetime.now(timezone.utc).isoformat()}",
+            system_message=system_msg,
+        ).with_model("openai", "gpt-5.2")
+        msg = UserMessage(text=f"Emails:\n{email_text}")
+        result = await chat.send_message(msg)
+        output_tokens = estimate_tokens(result)
+        await log_ai_usage(user["_id"], "analyze-email-thread", input_tokens, output_tokens)
+        return {"analysis": result, "email_count": len(emails)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Email thread analysis error: {e}")
+        raise HTTPException(status_code=500, detail="AI service temporarily unavailable. Please try again.")
+
+# ── One-click: Convert Prospect to Tenant ──
+@api_router.post("/contacts/{contact_id}/convert-to-tenant")
+async def convert_to_tenant(contact_id: str, user=Depends(get_any_auth_user)):
+    c = await _owned_contact(contact_id, user)
+    now = datetime.now(timezone.utc).isoformat()
+    await db.contacts.update_one(
+        {"_id": validate_object_id(contact_id, "Contact")},
+        {"$set": {
+            "is_tenant": True,
+            "client_type": "leasing_tenant",
+            "leasing_stage": "Active Tenant",
+            "stage_updated_at": now,
+            "updated_at": now,
+        }},
+    )
+    await db.activities.insert_one({
+        "contact_id": contact_id, "user_id": user["_id"],
+        "activity_type": "note",
+        "description": f"Converted from prospect to active tenant (was: {c.get('leasing_stage','Inquiry')})",
+        "created_at": now,
+    })
+    return {"is_tenant": True, "leasing_stage": "Active Tenant", "stage_updated_at": now}
+
+# ── One-click: Send Renewal Offer (drafts email via AI, flips stage) ──
+@api_router.post("/contacts/{contact_id}/send-renewal-offer")
+async def send_renewal_offer(contact_id: str, user=Depends(get_any_auth_user)):
+    c = await _owned_contact(contact_id, user)
+    lease = await db.leases.find_one({"contact_id": contact_id, "user_id": user["_id"], "status": "active"})
+    await check_ai_rate_limit(user["_id"])
+    system_msg = f"""Draft a friendly, professional lease-renewal offer email.
+Tenant: {c.get('name','')}
+Current rent: ${lease.get('monthly_rent',0) if lease else 'N/A'}/mo
+Unit: {lease.get('unit','') if lease else 'N/A'}
+Lease end: {lease.get('lease_end','') if lease else 'N/A'}
+
+Include: subject line, greeting, brief thank-you, renewal terms placeholder, clear call-to-action.
+Return plain text with 'Subject:' on the first line."""
+    guard_ai_cost(system_msg)
+    input_tokens = estimate_tokens(system_msg)
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        chat = LlmChat(
+            api_key=settings.EMERGENT_LLM_KEY,
+            session_id=f"renewal-{contact_id}-{datetime.now(timezone.utc).isoformat()}",
+            system_message=system_msg,
+        ).with_model("openai", "gpt-5.2")
+        msg = UserMessage(text="Draft the renewal offer email now.")
+        draft = await chat.send_message(msg)
+        output_tokens = estimate_tokens(draft)
+        await log_ai_usage(user["_id"], "renewal-offer", input_tokens, output_tokens)
+    except Exception as e:
+        logger.error(f"Renewal draft error: {e}")
+        draft = f"Subject: Renewal Offer for your lease\n\nHi {c.get('name','there')},\n\nWe'd love to have you stay! Let's talk about renewing your lease.\n\nBest,\nYour Property Manager"
+    # Flip stage to Renewal Offered
+    now = datetime.now(timezone.utc).isoformat()
+    await db.contacts.update_one(
+        {"_id": validate_object_id(contact_id, "Contact")},
+        {"$set": {"leasing_stage": "Renewal Offered", "stage_updated_at": now, "updated_at": now}},
+    )
+    await db.activities.insert_one({
+        "contact_id": contact_id, "user_id": user["_id"],
+        "activity_type": "note",
+        "description": "Renewal offer drafted — moved to 'Renewal Offered' stage",
+        "created_at": now,
+    })
+    return {"draft": draft, "leasing_stage": "Renewal Offered"}
+
+# ── Indexes for new collections ──
+async def create_profile_indexes():
+    try:
+        await db.contact_files.create_index([("contact_id", 1), ("created_at", -1)], background=True)
+        await db.contact_files.create_index("user_id", background=True)
+        await db.leases.create_index([("contact_id", 1), ("status", 1)], background=True)
+        await db.leases.create_index("user_id", background=True)
+        await db.maintenance_tickets.create_index([("contact_id", 1), ("created_at", -1)], background=True)
+        await db.maintenance_tickets.create_index([("user_id", 1), ("status", 1)], background=True)
+        await db.calendar_events.create_index([("contact_id", 1), ("start", 1)], background=True)
+        await db.calendar_events.create_index("user_id", background=True)
+        logger.info("Profile page indexes created.")
+    except Exception as e:
+        logger.error(f"Profile index creation failed: {e}")
+
+
 # ─── Startup ───
 @app.on_event("startup")
 async def startup():
     # ── PERFORMANCE: Create comprehensive MongoDB indexes ──
     await create_mongodb_indexes()
+    await create_profile_indexes()
 
     # Seed admin
     admin_email = settings.ADMIN_EMAIL
