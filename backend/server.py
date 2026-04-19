@@ -1142,26 +1142,278 @@ async def create_contact(data: ContactCreate, background_tasks: BackgroundTasks,
     
     return doc
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# FEATURE: Smart Lists + Collections (Phase 13 — Contacts People page upgrade)
+# Helper functions that build MongoDB filters for each smart list / collection.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+SMART_LIST_IDS = [
+    "today_tours_followups", "first_contact", "second_contact",
+    "application_submitted", "at_risk_renewals", "stale_prospects",
+    "recently_active", "nurture_queue",
+]
+COLLECTION_IDS = ["prospects", "active_tenants", "past_tenants", "high_value_leads"]
+
+
+async def _contact_ids_with_recent_activity(user_id: str, within_hours: int = 24) -> set:
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=within_hours)).isoformat()
+    ids = set()
+    async for a in db.activities.find(
+        {"user_id": user_id, "created_at": {"$gte": cutoff}},
+        {"contact_id": 1},
+    ):
+        cid = a.get("contact_id")
+        if cid:
+            ids.add(cid)
+    return ids
+
+
+async def _contact_activity_count_map(user_id: str) -> dict:
+    """Return {contact_id: human_activity_count} for the user."""
+    pipeline = [
+        {"$match": {"user_id": user_id, "activity_type": {"$in": ["call", "email", "sms", "meeting", "note"]}}},
+        {"$group": {"_id": "$contact_id", "c": {"$sum": 1}}},
+    ]
+    out = {}
+    async for r in db.activities.aggregate(pipeline):
+        if r.get("_id"):
+            out[r["_id"]] = int(r.get("c", 0))
+    return out
+
+
+async def _contact_ids_with_tour_or_task_today(user_id: str) -> set:
+    today = datetime.now(timezone.utc).date()
+    today_iso = today.isoformat()
+    today_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc).isoformat()
+    today_end = datetime.combine(today, datetime.max.time(), tzinfo=timezone.utc).isoformat()
+    ids = set()
+    async for e in db.calendar_events.find(
+        {"user_id": user_id, "start": {"$gte": today_start, "$lte": today_end}},
+        {"contact_id": 1},
+    ):
+        if e.get("contact_id"):
+            ids.add(e["contact_id"])
+    async for t in db.tasks.find(
+        {"user_id": user_id, "due_date": today_iso, "completed": False},
+        {"contact_id": 1},
+    ):
+        if t.get("contact_id"):
+            ids.add(t["contact_id"])
+    return ids
+
+
+async def _contact_ids_with_active_lease(user_id: str) -> set:
+    ids = set()
+    async for le in db.leases.find({"user_id": user_id, "status": "active"}, {"contact_id": 1}):
+        if le.get("contact_id"):
+            ids.add(le["contact_id"])
+    return ids
+
+
+async def _contact_ids_with_ended_lease(user_id: str) -> set:
+    ids = set()
+    async for le in db.leases.find(
+        {"user_id": user_id, "status": {"$in": ["ended", "terminated", "expired"]}},
+        {"contact_id": 1},
+    ):
+        if le.get("contact_id"):
+            ids.add(le["contact_id"])
+    return ids
+
+
+async def _contact_ids_with_renewal_soon(user_id: str, days: int = 60) -> set:
+    today = datetime.now(timezone.utc).date()
+    end_iso = (today + timedelta(days=days)).isoformat()
+    ids = set()
+    async for le in db.leases.find(
+        {"user_id": user_id, "status": "active", "lease_end": {"$gte": today.isoformat(), "$lte": end_iso, "$ne": ""}},
+        {"contact_id": 1},
+    ):
+        if le.get("contact_id"):
+            ids.add(le["contact_id"])
+    return ids
+
+
+async def _contact_ids_in_stage(user_id: str, stage: str) -> set:
+    ids = set()
+    async for d in db.deals.find(
+        {"user_id": user_id, "stage": stage},
+        {"contact_id": 1},
+    ):
+        if d.get("contact_id"):
+            ids.add(d["contact_id"])
+    return ids
+
+
+# Sentinel filter that matches no documents (for empty-id edge case)
+_EMPTY_FILTER = {"_id": {"$in": [ObjectId()]}, "user_id": {"$exists": False}}
+
+
+async def _build_smart_list_filter(user_id: str, smart_list: str):
+    """Return a Mongo filter (without user_id — caller combines via $and) for the given smart list."""
+    sl = smart_list.strip().lower()
+
+    if sl in ("today_tours", "today_tours_followups"):
+        ids = await _contact_ids_with_tour_or_task_today(user_id)
+        return {"id": {"$in": list(ids)}} if ids else _EMPTY_FILTER
+
+    if sl == "first_contact":
+        # Leads/prospects with zero human activity
+        act_map = await _contact_activity_count_map(user_id)
+        contacted_ids = list(act_map.keys())
+        return {
+            "$and": [
+                {"$or": [
+                    {"client_type": {"$in": ["lead", "prospect", None, ""]}},
+                    {"client_type": {"$exists": False}},
+                ]},
+                {"id": {"$nin": contacted_ids}},
+            ]
+        }
+
+    if sl == "second_contact":
+        act_map = await _contact_activity_count_map(user_id)
+        ids = [cid for cid, n in act_map.items() if n == 1]
+        return {"id": {"$in": ids}} if ids else _EMPTY_FILTER
+
+    if sl == "application_submitted":
+        deal_ids = await _contact_ids_in_stage(user_id, "Application Submitted")
+        conds = [{"leasing_stage": "Application Submitted"}]
+        if deal_ids:
+            conds.append({"id": {"$in": list(deal_ids)}})
+        return {"$or": conds}
+
+    if sl == "at_risk_renewals":
+        ids = await _contact_ids_with_renewal_soon(user_id, days=60)
+        if not ids:
+            return _EMPTY_FILTER
+        return {
+            "$and": [
+                {"id": {"$in": list(ids)}},
+                {"$or": [
+                    {"retention_score": {"$lt": 50}},
+                    {"tags": {"$in": ["at-risk", "retention-risk"]}},
+                    {"leasing_stage": "Renewal"},
+                ]},
+            ]
+        }
+
+    if sl == "stale_prospects":
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+        active_ids = await _contact_ids_with_recent_activity(user_id, within_hours=14 * 24)
+        return {
+            "$and": [
+                {"$or": [
+                    {"client_type": {"$in": ["lead", "prospect"]}},
+                    {"client_type": {"$exists": False}},
+                ]},
+                {"id": {"$nin": list(active_ids)}},
+                {"created_at": {"$lt": cutoff}},
+            ]
+        }
+
+    if sl == "recently_active":
+        ids = await _contact_ids_with_recent_activity(user_id, within_hours=24)
+        return {"id": {"$in": list(ids)}} if ids else _EMPTY_FILTER
+
+    if sl == "nurture_queue":
+        return {"tags": {"$in": ["nurture", "nurture-queue", "long-term"]}}
+
+    return None
+
+
+async def _build_collection_filter(user_id: str, collection: str):
+    col = collection.strip().lower()
+
+    if col == "prospects":
+        return {"$or": [
+            {"client_type": {"$in": ["lead", "prospect"]}},
+            {"client_type": {"$exists": False}},
+            {"client_type": None},
+            {"client_type": ""},
+        ]}
+
+    if col == "active_tenants":
+        ids = await _contact_ids_with_active_lease(user_id)
+        conds = [{"client_type": "tenant"}]
+        if ids:
+            conds.append({"id": {"$in": list(ids)}})
+        return {"$or": conds}
+
+    if col == "past_tenants":
+        ids = await _contact_ids_with_ended_lease(user_id)
+        return {"id": {"$in": list(ids)}} if ids else _EMPTY_FILTER
+
+    if col == "high_value_leads":
+        return {"$or": [
+            {"lead_score": {"$gte": 70}},
+            {"budget_max": {"$gte": 3500}},
+        ]}
+
+    return None
+
+
+@api_router.get("/contacts/smart-counts")
+async def contacts_smart_counts(user=Depends(get_any_auth_user)):
+    """Return counts for all smart lists + collections + all-people for the sidebar badges."""
+    uid = user["_id"]
+    out = {"all_people": await db.contacts.count_documents({"user_id": uid})}
+
+    for sl in SMART_LIST_IDS:
+        f = await _build_smart_list_filter(uid, sl)
+        if f is None:
+            out[sl] = 0
+        else:
+            try:
+                out[sl] = await db.contacts.count_documents({"$and": [{"user_id": uid}, f]})
+            except Exception as e:
+                logger.warning(f"smart-count for {sl} failed: {e}")
+                out[sl] = 0
+
+    for col in COLLECTION_IDS:
+        f = await _build_collection_filter(uid, col)
+        if f is None:
+            out[col] = 0
+        else:
+            try:
+                out[col] = await db.contacts.count_documents({"$and": [{"user_id": uid}, f]})
+            except Exception as e:
+                logger.warning(f"collection-count for {col} failed: {e}")
+                out[col] = 0
+
+    return out
+
+
 @api_router.get("/contacts")
 async def list_contacts(
     user=Depends(get_any_auth_user),
     search: str = "", property_type: str = "",
-    page: int = 1, limit: int = 50, sort: str = "created_at", order: str = "desc"
+    smart_list: str = "", collection: str = "",
+    page: int = 1, limit: int = 50, sort: str = "created_at", order: str = "desc",
 ):
-    query = {"user_id": user["_id"]}
+    conditions = [{"user_id": user["_id"]}]
     if search:
-        # SECURITY: Escape regex special characters to prevent ReDoS / injection
         safe_search = re.escape(search)
-        query["$or"] = [
+        conditions.append({"$or": [
             {"name": {"$regex": safe_search, "$options": "i"}},
             {"email": {"$regex": safe_search, "$options": "i"}},
             {"phone": {"$regex": safe_search, "$options": "i"}},
             {"company": {"$regex": safe_search, "$options": "i"}},
-        ]
+        ]})
     if property_type:
-        query["property_type"] = property_type
+        conditions.append({"property_type": property_type})
+    if smart_list:
+        f = await _build_smart_list_filter(user["_id"], smart_list)
+        if f is not None:
+            conditions.append(f)
+    if collection:
+        f = await _build_collection_filter(user["_id"], collection)
+        if f is not None:
+            conditions.append(f)
+    query = conditions[0] if len(conditions) == 1 else {"$and": conditions}
     sort_order = 1 if order == "asc" else -1
     return await paginate(db.contacts, query, page=page, limit=limit, sort_field=sort, sort_order=sort_order)
+
 
 CONTACT_CSV_FIELDS = [
     "name", "email", "phone", "company", "source", "property_type",

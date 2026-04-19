@@ -13,17 +13,28 @@ const unwrap = (res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // CONTACTS
 // ─────────────────────────────────────────────────────────────────────────────
-export function useContacts(search = '', propertyType = '') {
+export function useContacts(search = '', propertyType = '', smartList = '', collection = '') {
   return useQuery({
-    queryKey: ['contacts', { search, propertyType }],
+    queryKey: ['contacts', { search, propertyType, smartList, collection }],
     queryFn: async () => {
       const params = {};
       if (search) params.search = search;
       if (propertyType) params.property_type = propertyType;
+      if (smartList) params.smart_list = smartList;
+      if (collection) params.collection = collection;
       params.limit = 500;
       const res = await api.get('/contacts', { params });
       return unwrap(res);
     },
+    keepPreviousData: true,
+  });
+}
+
+export function useContactSmartCounts() {
+  return useQuery({
+    queryKey: ['contacts-smart-counts'],
+    queryFn: async () => (await api.get('/contacts/smart-counts')).data,
+    staleTime: 30 * 1000,
   });
 }
 
