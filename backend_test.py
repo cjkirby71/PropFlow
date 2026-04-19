@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 
 # Configuration
-BASE_URL = "https://propflow-crm-2.preview.emergentagent.com/api"
+BASE_URL = "https://propflow-crm-3.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@propflow.com"
 ADMIN_PASSWORD = "admin123"
 
