@@ -313,6 +313,18 @@ export function useDashboardStats() {
   });
 }
 
+// Phase 11: FUB-parity leasing overview (KPIs + sparklines + activity + action items)
+export function useLeasingOverview(range = '30d', scope = 'me') {
+  return useQuery({
+    queryKey: ['leasing-overview', range, scope],
+    queryFn: async () =>
+      (await api.get('/dashboard/leasing-overview', { params: { range, scope } })).data,
+    staleTime: 30 * 1000,
+    keepPreviousData: true,
+  });
+}
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SETTINGS: API Keys, Team, Webhooks
 // ─────────────────────────────────────────────────────────────────────────────

@@ -3152,6 +3152,387 @@ async def create_profile_indexes():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# FEATURE: Dashboard Leasing Overview (Phase 11)
+# Purpose-built aggregate endpoint for the FUB-parity residential-leasing
+# dashboard. Read-only, additive. No existing routes modified.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _parse_dashboard_range(range_str: str):
+    """
+    Returns (start, end, prev_start, prev_end, granularity).
+    range_str: '7d' | '30d' | '90d' | 'all'.
+    granularity: 'day' (7d/30d) | 'week' (90d/all).
+    """
+    now = datetime.now(timezone.utc)
+    if range_str == "all":
+        start = now - timedelta(days=365)
+        prev_end = start
+        prev_start = now - timedelta(days=730)
+        granularity = "week"
+    elif range_str == "90d":
+        start = now - timedelta(days=90)
+        prev_end = start
+        prev_start = now - timedelta(days=180)
+        granularity = "week"
+    elif range_str == "7d":
+        start = now - timedelta(days=7)
+        prev_end = start
+        prev_start = now - timedelta(days=14)
+        granularity = "day"
+    else:  # '30d' default
+        start = now - timedelta(days=30)
+        prev_end = start
+        prev_start = now - timedelta(days=60)
+        granularity = "day"
+    return start, now, prev_start, prev_end, granularity
+
+
+def _pct_growth(curr: float, prev: float) -> float:
+    """Standard growth %: positive means curr > prev."""
+    if prev <= 0 and curr <= 0:
+        return 0.0
+    if prev <= 0:
+        return 100.0
+    return round(((curr - prev) / prev) * 100, 1)
+
+
+def _parse_iso_safe(s):
+    """Parse ISO timestamps stored as strings; return None on failure."""
+    if not s or not isinstance(s, str):
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+async def _contact_lookup(contact_ids):
+    """Batch-fetch contacts by id (UUID string) OR _id (ObjectId). Returns dict keyed by whichever id string is in the activities/deals docs."""
+    result = {}
+    if not contact_ids:
+        return result
+    oids, sids = [], []
+    for cid in contact_ids:
+        if not cid:
+            continue
+        try:
+            oids.append(ObjectId(cid))
+        except Exception:
+            sids.append(cid)
+    projection = {"name": 1, "email": 1, "phone": 1, "leasing_stage": 1, "client_type": 1}
+    if oids:
+        async for c in db.contacts.find({"_id": {"$in": oids}}, projection):
+            result[str(c["_id"])] = c
+    if sids:
+        async for c in db.contacts.find({"id": {"$in": sids}}, {**projection, "id": 1}):
+            result[c.get("id", "")] = c
+    return result
+
+
+async def _timeseries_daily_count(match: dict, start, end, granularity: str):
+    """Aggregate document counts per day (or per week) based on created_at ISO strings."""
+    pipeline = [
+        {"$match": match},
+        {"$addFields": {"_d": {"$dateFromString": {"dateString": "$created_at", "onError": None, "onNull": None}}}},
+        {"$match": {"_d": {"$ne": None}}},
+        {"$group": {
+            "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$_d"}},
+            "count": {"$sum": 1},
+        }},
+    ]
+    rows = {}
+    async for r in db.deals.aggregate(pipeline):
+        rows[r["_id"]] = int(r["count"])
+    days = []
+    cur = start
+    while cur.date() <= end.date():
+        k = cur.strftime("%Y-%m-%d")
+        days.append({"date": k, "value": rows.get(k, 0)})
+        cur += timedelta(days=1)
+    if granularity == "week":
+        bucketed = []
+        i = 0
+        while i < len(days):
+            chunk = days[i:i+7]
+            bucketed.append({"date": chunk[0]["date"], "value": sum(x["value"] for x in chunk)})
+            i += 7
+        return bucketed
+    return days
+
+
+async def _avg_speed_to_first_contact(match_contacts: dict, start_iso: str, end_iso: str):
+    """Avg hours between contact.created_at and earliest human activity for contacts created in range."""
+    contacts_cursor = db.contacts.find(
+        {**match_contacts, "created_at": {"$gte": start_iso, "$lte": end_iso}},
+        {"_id": 1, "id": 1, "created_at": 1},
+    )
+    total_hours, sample = 0.0, 0
+    daily = {}
+    async for c in contacts_cursor:
+        cid_str = c.get("id") or str(c["_id"])
+        # Earliest human activity for this contact
+        first = await db.activities.find_one(
+            {"contact_id": cid_str, "activity_type": {"$in": ["call", "email", "sms", "meeting", "note"]}},
+            sort=[("created_at", 1)],
+        )
+        if not first:
+            continue
+        ca = _parse_iso_safe(c.get("created_at"))
+        fa = _parse_iso_safe(first.get("created_at"))
+        if not ca or not fa:
+            continue
+        delta_h = max(0.0, (fa - ca).total_seconds() / 3600.0)
+        total_hours += delta_h
+        sample += 1
+        k = ca.strftime("%Y-%m-%d")
+        daily.setdefault(k, []).append(delta_h)
+    avg = round(total_hours / sample, 1) if sample else 0.0
+    sparkline = [{"date": k, "value": round(sum(v)/len(v), 2)} for k, v in sorted(daily.items())]
+    return {"value": avg, "sample": sample, "sparkline": sparkline}
+
+
+async def _avg_lease_up_days(match_deals: dict, start_iso: str, end_iso: str):
+    """Avg days between deal.created_at and it reaching 'Lease Signed' / 'Move-In' / 'Active Tenant' (filtered by updated_at in range)."""
+    q = {
+        **match_deals,
+        "pipeline_type": "lease_applications",
+        "stage": {"$in": ["Lease Signed", "Move-In", "Active Tenant"]},
+        "updated_at": {"$gte": start_iso, "$lte": end_iso},
+    }
+    total, sample = 0.0, 0
+    daily = {}
+    async for d in db.deals.find(q, {"created_at": 1, "updated_at": 1}):
+        ca = _parse_iso_safe(d.get("created_at"))
+        ua = _parse_iso_safe(d.get("updated_at"))
+        if not ca or not ua:
+            continue
+        days = max(0.0, (ua - ca).total_seconds() / 86400.0)
+        total += days
+        sample += 1
+        k = ua.strftime("%Y-%m-%d")
+        daily.setdefault(k, []).append(days)
+    avg = round(total / sample, 1) if sample else 0.0
+    sparkline = [{"date": k, "value": round(sum(v)/len(v), 2)} for k, v in sorted(daily.items())]
+    return {"value": avg, "sample": sample, "sparkline": sparkline}
+
+
+async def _sum_renewals_within(match_leases: dict, today_iso: str, end_iso: str):
+    """Count + sum monthly_rent of active leases with lease_end in [today, end_iso]."""
+    pipeline = [
+        {"$match": {
+            **match_leases,
+            "status": "active",
+            "lease_end": {"$gte": today_iso, "$lte": end_iso, "$ne": ""},
+        }},
+        {"$group": {"_id": None, "count": {"$sum": 1}, "rent": {"$sum": {"$ifNull": ["$monthly_rent", 0]}}}},
+    ]
+    async for row in db.leases.aggregate(pipeline):
+        return {"count": int(row.get("count", 0)), "monthly_rent_total": float(row.get("rent", 0) or 0)}
+    return {"count": 0, "monthly_rent_total": 0.0}
+
+
+@api_router.get("/dashboard/leasing-overview")
+async def leasing_overview(
+    range: str = "30d",
+    scope: str = "me",
+    user=Depends(get_any_auth_user),
+):
+    if range not in ("7d", "30d", "90d", "all"):
+        raise HTTPException(status_code=400, detail="Invalid range (expected 7d|30d|90d|all)")
+    if scope not in ("me", "everyone"):
+        raise HTTPException(status_code=400, detail="Invalid scope (expected me|everyone)")
+
+    start, end, prev_start, prev_end, granularity = _parse_dashboard_range(range)
+    start_iso, end_iso = start.isoformat(), end.isoformat()
+    prev_start_iso, prev_end_iso = prev_start.isoformat(), prev_end.isoformat()
+
+    uid = user["_id"]
+    base = {} if scope == "everyone" else {"user_id": uid}
+
+    # ─── KPI 1: New Inquiries (deals created in lease_applications) ───
+    inq_match = {**base, "pipeline_type": "lease_applications", "created_at": {"$gte": start_iso, "$lte": end_iso}}
+    prev_inq_match = {**base, "pipeline_type": "lease_applications", "created_at": {"$gte": prev_start_iso, "$lt": prev_end_iso}}
+    new_inquiries = await db.deals.count_documents(inq_match)
+    prev_inquiries = await db.deals.count_documents(prev_inq_match)
+    inq_sparkline = await _timeseries_daily_count(inq_match, start, end, granularity)
+
+    # ─── KPI 2: Avg Speed to First Contact (hours) ───
+    speed = await _avg_speed_to_first_contact(base, start_iso, end_iso)
+    prev_speed = await _avg_speed_to_first_contact(base, prev_start_iso, prev_end_iso)
+
+    # ─── KPI 3: Lease-Up Velocity (days Inquiry → Signed) ───
+    velocity = await _avg_lease_up_days(base, start_iso, end_iso)
+    prev_velocity = await _avg_lease_up_days(base, prev_start_iso, prev_end_iso)
+
+    # ─── KPI 4: Current Occupancy Rate ───
+    total_leases = await db.leases.count_documents(base)
+    active_leases = await db.leases.count_documents({**base, "status": "active"})
+    total_props = await db.properties.count_documents(base)
+    rented_props = await db.properties.count_documents({**base, "status": {"$in": ["rented", "leased"]}})
+    if total_leases > 0:
+        units_total, units_occupied = total_leases, active_leases
+    else:
+        units_total, units_occupied = total_props, rented_props
+    occupancy_pct = round((units_occupied / units_total * 100), 1) if units_total > 0 else 0.0
+
+    # ─── KPI 5: Upcoming Renewals (30 / 60 / 90 days) ───
+    today = datetime.now(timezone.utc).date()
+    today_iso = today.isoformat()
+    d30_end = (today + timedelta(days=30)).isoformat()
+    d60_end = (today + timedelta(days=60)).isoformat()
+    d90_end = (today + timedelta(days=90)).isoformat()
+    renewals_30 = await _sum_renewals_within(base, today_iso, d30_end)
+    renewals_60 = await _sum_renewals_within(base, today_iso, d60_end)
+    renewals_90 = await _sum_renewals_within(base, today_iso, d90_end)
+
+    # ─── Today's Action Items (Tours + Tasks) ───
+    today_start_dt = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc).isoformat()
+    today_end_dt = datetime.combine(today, datetime.max.time(), tzinfo=timezone.utc).isoformat()
+
+    tour_events_raw = await db.calendar_events.find(
+        {**base, "start": {"$gte": today_start_dt, "$lte": today_end_dt}},
+    ).sort("start", 1).to_list(30)
+    tasks_today_raw = await db.tasks.find(
+        {**base, "completed": False, "due_date": today_iso},
+    ).to_list(50)
+
+    ai_contact_ids = (
+        {e.get("contact_id") for e in tour_events_raw if e.get("contact_id")}
+        | {t.get("contact_id") for t in tasks_today_raw if t.get("contact_id")}
+    )
+    ai_contact_lookup = await _contact_lookup(ai_contact_ids)
+
+    priority_rank = {"high": 0, "medium": 1, "low": 2}
+
+    tours_out = []
+    for e in tour_events_raw:
+        cid = e.get("contact_id", "")
+        c = ai_contact_lookup.get(cid, {})
+        tours_out.append({
+            "id": str(e.get("_id", "")),
+            "title": e.get("title", ""),
+            "start": e.get("start", ""),
+            "end": e.get("end", ""),
+            "location": e.get("location", ""),
+            "event_type": e.get("event_type", "meeting"),
+            "contact_id": cid,
+            "contact_name": c.get("name", ""),
+        })
+
+    tasks_today_raw.sort(key=lambda t: priority_rank.get(t.get("priority", "medium"), 1))
+    tasks_out = []
+    for t in tasks_today_raw:
+        cid = t.get("contact_id", "")
+        c = ai_contact_lookup.get(cid, {})
+        tasks_out.append({
+            "id": str(t.get("_id", "")),
+            "title": t.get("title", ""),
+            "priority": t.get("priority", "medium"),
+            "due_date": t.get("due_date", ""),
+            "contact_id": cid,
+            "contact_name": c.get("name", ""),
+            "deal_id": t.get("deal_id", ""),
+        })
+
+    # ─── Recent Activity (enriched) ───
+    activities = await db.activities.find(
+        {**base, "created_at": {"$gte": start_iso}},
+    ).sort("created_at", -1).limit(25).to_list(25)
+
+    act_cids = {a.get("contact_id") for a in activities if a.get("contact_id")}
+    act_contact_lookup = await _contact_lookup(act_cids)
+
+    # Users lookup for "Assigned"
+    user_ids = {a.get("user_id") for a in activities if a.get("user_id")}
+    user_lookup = {}
+    for uid2 in user_ids:
+        if not uid2:
+            continue
+        try:
+            u = await db.users.find_one({"_id": ObjectId(uid2)}, {"name": 1, "email": 1})
+        except Exception:
+            u = None
+        if u:
+            user_lookup[uid2] = u.get("name") or u.get("email") or ""
+
+    # Most recent deal per contact (for stage + unit)
+    deals_map = {}
+    if act_cids:
+        async for d in db.deals.find({**base, "contact_id": {"$in": list(act_cids)}}).sort("updated_at", -1):
+            cid = d.get("contact_id", "")
+            if cid and cid not in deals_map:
+                deals_map[cid] = d
+
+    activity_out = []
+    for a in activities:
+        cid = a.get("contact_id", "")
+        c = act_contact_lookup.get(cid, {})
+        d = deals_map.get(cid, {})
+        activity_out.append({
+            "id": str(a.get("_id", "")),
+            "contact_id": cid,
+            "contact_name": c.get("name") or "Unknown",
+            "contact_email": c.get("email", ""),
+            "contact_phone": c.get("phone", ""),
+            "activity_type": a.get("activity_type", "note"),
+            "description": a.get("description", ""),
+            "created_at": a.get("created_at", ""),
+            "stage": c.get("leasing_stage") or d.get("stage", ""),
+            "assigned_to_name": user_lookup.get(a.get("user_id", "")) or "",
+            "unit": d.get("unit_number") or d.get("unit_address") or "",
+        })
+
+    return {
+        "range": range,
+        "scope": scope,
+        "granularity": granularity,
+        "kpis": {
+            "new_inquiries": {
+                "value": new_inquiries,
+                "previous": prev_inquiries,
+                "growth_pct": _pct_growth(new_inquiries, prev_inquiries),
+                "lower_is_better": False,
+                "sparkline": inq_sparkline,
+            },
+            "avg_speed_to_first_contact": {
+                "value_hours": speed["value"],
+                "previous_hours": prev_speed["value"],
+                "growth_pct": _pct_growth(speed["value"], prev_speed["value"]),
+                "lower_is_better": True,
+                "sample_size": speed["sample"],
+                "sparkline": speed["sparkline"],
+            },
+            "lease_up_velocity": {
+                "value_days": velocity["value"],
+                "previous_days": prev_velocity["value"],
+                "growth_pct": _pct_growth(velocity["value"], prev_velocity["value"]),
+                "lower_is_better": True,
+                "sample_size": velocity["sample"],
+                "sparkline": velocity["sparkline"],
+            },
+            "current_occupancy_rate": {
+                "value_pct": occupancy_pct,
+                "units_occupied": units_occupied,
+                "units_total": units_total,
+                "lower_is_better": False,
+                "sparkline": [],
+            },
+            "upcoming_renewals": {
+                "d30": renewals_30,
+                "d60": renewals_60,
+                "d90": renewals_90,
+            },
+        },
+        "todays_action_items": {
+            "tours": tours_out,
+            "tasks": tasks_out,
+        },
+        "recent_activity": activity_out,
+    }
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # FEATURE: Lease Applications Pipeline (Phase 10)
 # Appended additively. No existing routes modified.
 # ═══════════════════════════════════════════════════════════════════════════════
