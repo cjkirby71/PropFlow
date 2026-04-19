@@ -1456,6 +1456,61 @@ async def list_deals(
     sort_order = 1 if order == "asc" else -1
     return await paginate(db.deals, query, page=page, limit=limit, sort_field=sort, sort_order=sort_order)
 
+# ── Pipeline summary with counts + totals per stage ──
+@api_router.get("/deals/pipeline-summary")
+async def pipeline_summary(
+    pipeline_type: str = "lease_applications",
+    scope: str = "me",
+    user=Depends(get_any_auth_user),
+):
+    if pipeline_type not in PIPELINE_STAGES:
+        raise HTTPException(status_code=400, detail="Invalid pipeline_type")
+    query = {"pipeline_type": pipeline_type}
+    if scope != "everyone":
+        query["user_id"] = user["_id"]
+
+    builtin = list(PIPELINE_STAGES[pipeline_type])
+    custom = list((user.get("custom_stages") or {}).get(pipeline_type, []))
+    all_stages = builtin + [c for c in custom if c not in builtin]
+
+    pipeline = [
+        {"$match": query},
+        {"$group": {
+            "_id": "$stage",
+            "count": {"$sum": 1},
+            "total_value": {"$sum": {"$ifNull": ["$desired_rent", {"$ifNull": ["$value", 0]}]}},
+        }},
+    ]
+    cursor = db.deals.aggregate(pipeline)
+    buckets = {}
+    async for row in cursor:
+        buckets[row["_id"]] = row
+
+    stages = []
+    total_value = 0.0
+    total_count = 0
+    for idx, s in enumerate(all_stages):
+        b = buckets.get(s, {"count": 0, "total_value": 0})
+        color = LEASE_APPLICATIONS_STAGE_COLORS.get(s)
+        stages.append({
+            "name": s,
+            "count": int(b["count"]),
+            "total_value": float(b.get("total_value", 0) or 0),
+            "color": color["bg"] if color else "slate",
+            "color_hex": color["hex"] if color else "#64748B",
+            "is_custom": s not in builtin,
+            "order": idx,
+        })
+        total_value += float(b.get("total_value", 0) or 0)
+        total_count += int(b["count"])
+    return {
+        "pipeline_type": pipeline_type,
+        "scope": scope,
+        "stages": stages,
+        "total_pipeline_value": total_value,
+        "total_deals": total_count,
+    }
+
 @api_router.get("/deals/{deal_id}")
 async def get_deal(deal_id: str, user=Depends(get_any_auth_user)):
     deal = await db.deals.find_one({"_id": validate_object_id(deal_id, "Deal"), "user_id": user["_id"]})
@@ -3113,61 +3168,6 @@ class CustomStageBody(BaseModel):
             raise ValueError(f"pipeline_type must be one of: {', '.join(allowed)}")
         return v
 
-# ── Pipeline summary with counts + totals per stage ──
-@api_router.get("/deals/pipeline-summary")
-async def pipeline_summary(
-    pipeline_type: str = "lease_applications",
-    scope: str = "me",
-    user=Depends(get_any_auth_user),
-):
-    if pipeline_type not in PIPELINE_STAGES:
-        raise HTTPException(status_code=400, detail="Invalid pipeline_type")
-    query = {"pipeline_type": pipeline_type}
-    if scope != "everyone":
-        query["user_id"] = user["_id"]
-
-    builtin = list(PIPELINE_STAGES[pipeline_type])
-    custom = list((user.get("custom_stages") or {}).get(pipeline_type, []))
-    all_stages = builtin + [c for c in custom if c not in builtin]
-
-    pipeline = [
-        {"$match": query},
-        {"$group": {
-            "_id": "$stage",
-            "count": {"$sum": 1},
-            "total_value": {"$sum": {"$ifNull": ["$desired_rent", {"$ifNull": ["$value", 0]}]}},
-        }},
-    ]
-    cursor = db.deals.aggregate(pipeline)
-    buckets = {}
-    async for row in cursor:
-        buckets[row["_id"]] = row
-
-    stages = []
-    total_value = 0.0
-    total_count = 0
-    for idx, s in enumerate(all_stages):
-        b = buckets.get(s, {"count": 0, "total_value": 0})
-        color = LEASE_APPLICATIONS_STAGE_COLORS.get(s)
-        stages.append({
-            "name": s,
-            "count": int(b["count"]),
-            "total_value": float(b.get("total_value", 0) or 0),
-            "color": color["bg"] if color else "slate",
-            "color_hex": color["hex"] if color else "#64748B",
-            "is_custom": s not in builtin,
-            "order": idx,
-        })
-        total_value += float(b.get("total_value", 0) or 0)
-        total_count += int(b["count"])
-    return {
-        "pipeline_type": pipeline_type,
-        "scope": scope,
-        "stages": stages,
-        "total_pipeline_value": total_value,
-        "total_deals": total_count,
-    }
-
 # ── Custom user-defined stages ──
 @api_router.get("/pipeline/custom-stages")
 async def get_custom_stages(pipeline_type: str = "lease_applications", user=Depends(get_any_auth_user)):
@@ -3183,24 +3183,28 @@ async def add_custom_stage(data: CustomStageBody, user=Depends(get_any_auth_user
         raise HTTPException(status_code=400, detail="Stage name required")
     if name in PIPELINE_STAGES[data.pipeline_type]:
         raise HTTPException(status_code=400, detail="Stage already exists as a built-in stage")
+    user_id = ObjectId(user["_id"]) if isinstance(user["_id"], str) else user["_id"]
     await db.users.update_one(
-        {"_id": user["_id"]},
+        {"_id": user_id},
         {"$addToSet": {f"custom_stages.{data.pipeline_type}": name}},
     )
-    updated = await db.users.find_one({"_id": user["_id"]}, {"custom_stages": 1})
+    updated = await db.users.find_one({"_id": user_id}, {"custom_stages": 1})
+    if not updated:
+        raise HTTPException(status_code=500, detail="User not found after update")
     return {"stages": (updated.get("custom_stages") or {}).get(data.pipeline_type, [])}
 
 @api_router.delete("/pipeline/custom-stages/{pipeline_type}/{name}")
 async def remove_custom_stage(pipeline_type: str, name: str, user=Depends(get_any_auth_user)):
     if pipeline_type not in PIPELINE_STAGES:
         raise HTTPException(status_code=400, detail="Invalid pipeline_type")
+    user_id = ObjectId(user["_id"]) if isinstance(user["_id"], str) else user["_id"]
     count = await db.deals.count_documents({
         "user_id": user["_id"], "pipeline_type": pipeline_type, "stage": name
     })
     if count > 0:
         raise HTTPException(status_code=400, detail=f"Cannot remove stage: {count} deal(s) still in this stage")
     await db.users.update_one(
-        {"_id": user["_id"]},
+        {"_id": user_id},
         {"$pull": {f"custom_stages.{pipeline_type}": name}},
     )
     return {"message": "Stage removed"}
