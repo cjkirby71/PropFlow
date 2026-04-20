@@ -780,3 +780,109 @@ export function useRemoveCustomStage() {
     },
   });
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 14 — UNIFIED INBOX
+// ─────────────────────────────────────────────────────────────────────────────
+export function useInboxCounts() {
+  return useQuery({
+    queryKey: ['inbox-counts'],
+    queryFn: async () => (await api.get('/inbox/counts')).data,
+    staleTime: 15 * 1000,
+    refetchInterval: 30 * 1000,
+  });
+}
+
+export function useInboxThreads({ folder = 'inbox', channel = '', search = '' } = {}) {
+  return useQuery({
+    queryKey: ['inbox-threads', { folder, channel, search }],
+    queryFn: async () => {
+      const params = { folder, limit: 150 };
+      if (channel) params.channel = channel;
+      if (search) params.search = search;
+      const res = await api.get('/inbox/threads', { params });
+      return res.data.threads || [];
+    },
+    staleTime: 15 * 1000,
+    keepPreviousData: true,
+  });
+}
+
+export function useInboxThread(contactId) {
+  return useQuery({
+    queryKey: ['inbox-thread', contactId],
+    queryFn: async () => (await api.get(`/inbox/threads/${contactId}`)).data,
+    enabled: !!contactId,
+    staleTime: 5 * 1000,
+  });
+}
+
+export function useSendInboxReply(contactId) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data) => api.post(`/inbox/threads/${contactId}/reply`, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['inbox-thread', contactId] });
+      qc.invalidateQueries({ queryKey: ['inbox-threads'] });
+      qc.invalidateQueries({ queryKey: ['inbox-counts'] });
+    },
+  });
+}
+
+export function useMarkThreadRead() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (contactId) => api.post(`/inbox/threads/${contactId}/read`),
+    onSuccess: (_, contactId) => {
+      qc.invalidateQueries({ queryKey: ['inbox-thread', contactId] });
+      qc.invalidateQueries({ queryKey: ['inbox-threads'] });
+      qc.invalidateQueries({ queryKey: ['inbox-counts'] });
+    },
+  });
+}
+
+export function useAssignThread() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (contactId) => api.post(`/inbox/threads/${contactId}/assign`),
+    onSuccess: (_, contactId) => {
+      qc.invalidateQueries({ queryKey: ['inbox-thread', contactId] });
+      qc.invalidateQueries({ queryKey: ['inbox-threads'] });
+      qc.invalidateQueries({ queryKey: ['inbox-counts'] });
+    },
+  });
+}
+
+export function useCloseThread() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (contactId) => api.post(`/inbox/threads/${contactId}/close`),
+    onSuccess: (_, contactId) => {
+      qc.invalidateQueries({ queryKey: ['inbox-thread', contactId] });
+      qc.invalidateQueries({ queryKey: ['inbox-threads'] });
+      qc.invalidateQueries({ queryKey: ['inbox-counts'] });
+    },
+  });
+}
+
+export function useSaveInboxDraft() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data) => api.put('/inbox/drafts', data),
+    onSuccess: (_, vars) => {
+      qc.invalidateQueries({ queryKey: ['inbox-thread', vars.contact_id] });
+      qc.invalidateQueries({ queryKey: ['inbox-counts'] });
+    },
+  });
+}
+
+export function useSeedInboxDemo() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post('/inbox/seed-demo'),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['inbox-threads'] });
+      qc.invalidateQueries({ queryKey: ['inbox-counts'] });
+    },
+  });
+}

@@ -3876,6 +3876,7 @@ async def startup():
     # ── PERFORMANCE: Create comprehensive MongoDB indexes ──
     await create_mongodb_indexes()
     await create_profile_indexes()
+    await create_inbox_indexes()
     # ── Phase 10: one-time migration ──
     await migrate_residential_lease_to_lease_applications()
 
@@ -3903,6 +3904,514 @@ async def startup():
     # ── Start background sequence polling worker ──
     asyncio.create_task(process_sequence_executions())
     logger.info("Sequence polling worker started")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHASE 14 — UNIFIED INBOX (Email + SMS + Voicemail)
+# Threads are grouped by contact_id. Messages collection stores every inbound /
+# outbound communication. Thread meta (assignment, status) lives in
+# inbox_threads. Drafts in inbox_drafts.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class InboxReplyRequest(BaseModel):
+    channel: str = Field(..., max_length=20)
+    subject: Optional[str] = Field(default="", max_length=500)
+    body: str = Field(..., min_length=1, max_length=50000)
+
+    @field_validator("channel")
+    @classmethod
+    def validate_channel(cls, v):
+        if v not in ("email", "sms"):
+            raise ValueError("channel must be 'email' or 'sms'")
+        return v
+
+
+class InboxDraftRequest(BaseModel):
+    contact_id: str = Field(..., max_length=50)
+    channel: str = Field(..., max_length=20)
+    subject: Optional[str] = Field(default="", max_length=500)
+    body: Optional[str] = Field(default="", max_length=50000)
+
+    @field_validator("channel")
+    @classmethod
+    def validate_draft_channel(cls, v):
+        if v not in ("email", "sms"):
+            raise ValueError("channel must be 'email' or 'sms'")
+        return v
+
+
+async def _ensure_thread_meta(user_id: str, contact_id: str) -> dict:
+    """Create or return the inbox_threads meta doc for a (user, contact)."""
+    meta = await db.inbox_threads.find_one({"user_id": user_id, "contact_id": contact_id})
+    if not meta:
+        now = datetime.now(timezone.utc).isoformat()
+        meta = {
+            "user_id": user_id,
+            "contact_id": contact_id,
+            "assigned_to": None,
+            "status": "open",
+            "last_message_at": now,
+            "last_updated": now,
+        }
+        await db.inbox_threads.insert_one(meta)
+    return meta
+
+
+async def _log_inbox_message(user_id: str, contact_id: str, channel: str, direction: str,
+                             body: str, subject: str = "", from_addr: str = "",
+                             to_addr: str = "", external_id: str = "") -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "user_id": user_id,
+        "contact_id": contact_id,
+        "channel": channel,
+        "direction": direction,
+        "subject": subject or "",
+        "body": body,
+        "from_addr": from_addr or "",
+        "to_addr": to_addr or "",
+        "external_id": external_id or "",
+        "read": direction == "outbound",  # outbound are implicitly read
+        "created_at": now,
+    }
+    await db.messages.insert_one(doc)
+    await _ensure_thread_meta(user_id, contact_id)
+    await db.inbox_threads.update_one(
+        {"user_id": user_id, "contact_id": contact_id},
+        {"$set": {"last_message_at": now, "last_updated": now}},
+    )
+    doc.pop("_id", None)
+    return doc
+
+
+@api_router.get("/inbox/counts")
+async def inbox_counts(user=Depends(get_any_auth_user)):
+    """Folder counts + unread count for sidebar badges."""
+    uid = user["_id"]
+    base = {"user_id": uid}
+
+    # All threads (not closed)
+    open_threads = await db.inbox_threads.count_documents({**base, "status": "open"})
+    assigned = await db.inbox_threads.count_documents({**base, "status": "open", "assigned_to": uid})
+    closed = await db.inbox_threads.count_documents({**base, "status": "closed"})
+    drafts = await db.inbox_drafts.count_documents(base)
+
+    # Sent = threads whose most-recent message is outbound (use aggregation)
+    sent_pipeline = [
+        {"$match": {"user_id": uid}},
+        {"$sort": {"created_at": -1}},
+        {"$group": {"_id": "$contact_id", "last_direction": {"$first": "$direction"}}},
+        {"$match": {"last_direction": "outbound"}},
+        {"$count": "n"},
+    ]
+    sent_agg = await db.messages.aggregate(sent_pipeline).to_list(1)
+    sent = sent_agg[0]["n"] if sent_agg else 0
+
+    # Unread inbound messages count
+    unread = await db.messages.count_documents({**base, "direction": "inbound", "read": False})
+
+    return {
+        "inbox": open_threads,
+        "assigned": assigned,
+        "drafts": drafts,
+        "sent": sent,
+        "closed": closed,
+        "unread": unread,
+    }
+
+
+@api_router.get("/inbox/threads")
+async def list_inbox_threads(
+    user=Depends(get_any_auth_user),
+    folder: str = "inbox", channel: str = "", search: str = "",
+    limit: int = 100,
+):
+    """List conversation threads (one per contact) with last-message summary."""
+    uid = user["_id"]
+    limit = max(1, min(limit, 300))
+
+    # Determine which contacts belong to this folder
+    if folder == "closed":
+        metas = await db.inbox_threads.find({"user_id": uid, "status": "closed"}).to_list(1000)
+        allowed_cids = {m["contact_id"] for m in metas}
+    elif folder == "assigned":
+        metas = await db.inbox_threads.find({"user_id": uid, "status": "open", "assigned_to": uid}).to_list(1000)
+        allowed_cids = {m["contact_id"] for m in metas}
+    elif folder == "drafts":
+        draft_docs = await db.inbox_drafts.find({"user_id": uid}).to_list(1000)
+        allowed_cids = {d["contact_id"] for d in draft_docs}
+    elif folder == "sent":
+        pipeline = [
+            {"$match": {"user_id": uid}},
+            {"$sort": {"created_at": -1}},
+            {"$group": {"_id": "$contact_id", "last_direction": {"$first": "$direction"}}},
+            {"$match": {"last_direction": "outbound"}},
+        ]
+        sent_docs = await db.messages.aggregate(pipeline).to_list(1000)
+        allowed_cids = {s["_id"] for s in sent_docs}
+    else:  # inbox (default) — all open threads
+        metas = await db.inbox_threads.find({"user_id": uid, "status": "open"}).to_list(1000)
+        allowed_cids = {m["contact_id"] for m in metas}
+
+    if not allowed_cids and folder != "drafts":
+        return {"threads": []}
+
+    # Build messages aggregation grouped by contact to get last message + unread count
+    match = {"user_id": uid}
+    if allowed_cids:
+        match["contact_id"] = {"$in": list(allowed_cids)}
+    if channel and channel in ("email", "sms", "voicemail"):
+        match["channel"] = channel
+
+    pipeline = [
+        {"$match": match},
+        {"$sort": {"created_at": -1}},
+        {"$group": {
+            "_id": "$contact_id",
+            "last_body": {"$first": "$body"},
+            "last_subject": {"$first": "$subject"},
+            "last_channel": {"$first": "$channel"},
+            "last_direction": {"$first": "$direction"},
+            "last_at": {"$first": "$created_at"},
+            "unread": {"$sum": {"$cond": [
+                {"$and": [{"$eq": ["$direction", "inbound"]}, {"$eq": ["$read", False]}]},
+                1, 0
+            ]}},
+            "count": {"$sum": 1},
+        }},
+        {"$sort": {"last_at": -1}},
+        {"$limit": limit},
+    ]
+    agg = await db.messages.aggregate(pipeline).to_list(limit)
+
+    # For drafts folder, if a contact has no message yet but has a draft, also include
+    if folder == "drafts":
+        existing_cids = {a["_id"] for a in agg}
+        draft_only_cids = list(allowed_cids - existing_cids)
+        for cid in draft_only_cids:
+            agg.append({
+                "_id": cid, "last_body": "", "last_subject": "", "last_channel": "email",
+                "last_direction": "draft", "last_at": "", "unread": 0, "count": 0,
+            })
+
+    # Fetch contact + meta for each thread
+    cids_valid = [c for c in [a["_id"] for a in agg] if c]
+    oids = []
+    for c in cids_valid:
+        try:
+            oids.append(ObjectId(c))
+        except Exception:
+            pass
+    contacts_map = {}
+    if oids:
+        async for c in db.contacts.find({"_id": {"$in": oids}, "user_id": uid}):
+            contacts_map[str(c["_id"])] = c
+
+    metas_map = {m["contact_id"]: m for m in
+                 await db.inbox_threads.find({"user_id": uid, "contact_id": {"$in": list(cids_valid)}}).to_list(1000)}
+    drafts_map = {d["contact_id"]: d for d in
+                  await db.inbox_drafts.find({"user_id": uid, "contact_id": {"$in": list(cids_valid)}}).to_list(1000)}
+
+    threads = []
+    for row in agg:
+        cid = row["_id"]
+        contact = contacts_map.get(cid)
+        if not contact and folder != "drafts":
+            continue  # contact deleted; skip
+        name = (contact or {}).get("name") or "Unknown"
+        email = (contact or {}).get("email") or ""
+        phone = (contact or {}).get("phone") or ""
+        # Apply search filter (contact name/email/phone OR message body)
+        if search:
+            s = search.lower()
+            haystack = " ".join([name, email, phone, row.get("last_body", ""), row.get("last_subject", "")]).lower()
+            if s not in haystack:
+                continue
+        meta = metas_map.get(cid, {})
+        draft = drafts_map.get(cid)
+        threads.append({
+            "contact_id": cid,
+            "name": name,
+            "email": email,
+            "phone": phone,
+            "photo_url": (contact or {}).get("photo_url") or "",
+            "last_body": row.get("last_body", ""),
+            "last_subject": row.get("last_subject", ""),
+            "last_channel": row.get("last_channel", "email"),
+            "last_direction": row.get("last_direction", "inbound"),
+            "last_at": row.get("last_at", ""),
+            "unread": row.get("unread", 0),
+            "message_count": row.get("count", 0),
+            "status": meta.get("status", "open"),
+            "assigned_to": meta.get("assigned_to"),
+            "has_draft": draft is not None,
+            "draft_preview": (draft or {}).get("body", "")[:120] if draft else "",
+        })
+    return {"threads": threads}
+
+
+@api_router.get("/inbox/threads/{contact_id}")
+async def get_inbox_thread(contact_id: str, user=Depends(get_any_auth_user)):
+    """Return the full message history + contact card for a given thread."""
+    uid = user["_id"]
+    # Validate contact belongs to user
+    try:
+        cid_oid = ObjectId(contact_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    contact = await db.contacts.find_one({"_id": cid_oid, "user_id": uid})
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    msgs = await db.messages.find(
+        {"user_id": uid, "contact_id": contact_id}
+    ).sort("created_at", 1).to_list(1000)
+    for m in msgs:
+        m.pop("_id", None)
+
+    await _ensure_thread_meta(uid, contact_id)
+    meta = await db.inbox_threads.find_one({"user_id": uid, "contact_id": contact_id}) or {}
+    draft = await db.inbox_drafts.find_one({"user_id": uid, "contact_id": contact_id})
+
+    # Serialize contact
+    contact_out = {
+        "id": str(contact["_id"]),
+        "name": contact.get("name", ""),
+        "email": contact.get("email", ""),
+        "phone": contact.get("phone", ""),
+        "photo_url": contact.get("photo_url", ""),
+        "company": contact.get("company", ""),
+        "tags": contact.get("tags", []),
+        "lease_status": contact.get("lease_status", "") or contact.get("leasing_stage", ""),
+        "next_renewal_date": contact.get("next_renewal_date", "") or contact.get("lease_end_date", ""),
+        "unit_interested": contact.get("unit_interested", "") or contact.get("unit_interest", ""),
+        "retention_score": contact.get("retention_score", None),
+        "is_tenant": contact.get("is_tenant", False),
+    }
+
+    return {
+        "contact": contact_out,
+        "messages": msgs,
+        "status": meta.get("status", "open"),
+        "assigned_to": meta.get("assigned_to"),
+        "draft": {
+            "channel": (draft or {}).get("channel", "email"),
+            "subject": (draft or {}).get("subject", ""),
+            "body": (draft or {}).get("body", ""),
+        } if draft else None,
+    }
+
+
+@api_router.post("/inbox/threads/{contact_id}/reply")
+async def inbox_reply(contact_id: str, data: InboxReplyRequest,
+                      background_tasks: BackgroundTasks,
+                      user=Depends(get_any_auth_user)):
+    """Send an email or SMS reply; log it into messages + activities."""
+    uid = user["_id"]
+    try:
+        cid_oid = ObjectId(contact_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    contact = await db.contacts.find_one({"_id": cid_oid, "user_id": uid})
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    channel = data.channel
+    external_id = ""
+    if channel == "email":
+        to_email = contact.get("email", "")
+        if not to_email:
+            raise HTTPException(status_code=400, detail="Contact has no email address")
+        brevo_key = settings.BREVO_API_KEY
+        if brevo_key and settings.SENDER_EMAIL:
+            try:
+                external_id = send_email_with_retry(brevo_key, to_email,
+                                                   data.subject or "(no subject)",
+                                                   data.body.replace("\n", "<br>"))
+                external_id = str(external_id) if external_id else ""
+            except Exception as e:
+                logger.error(f"Inbox email send failed: {e}")
+                # still log the message as sent locally so user sees it
+        else:
+            logger.warning("Inbox: BREVO_API_KEY missing — message logged locally only")
+        msg = await _log_inbox_message(uid, contact_id, "email", "outbound",
+                                       data.body, subject=data.subject or "",
+                                       from_addr=settings.SENDER_EMAIL or "",
+                                       to_addr=to_email, external_id=external_id)
+        await db.activities.insert_one({
+            "contact_id": contact_id, "user_id": uid,
+            "activity_type": "email",
+            "description": f"Sent email: {data.subject or '(no subject)'}",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        background_tasks.add_task(trigger_webhooks, uid, "email_sent",
+                                  {"contact_id": contact_id, "subject": data.subject or ""})
+    else:  # sms
+        to_phone = contact.get("phone", "")
+        if not to_phone:
+            raise HTTPException(status_code=400, detail="Contact has no phone number")
+        acct = settings.TWILIO_ACCOUNT_SID
+        tok = settings.TWILIO_AUTH_TOKEN
+        frm = settings.TWILIO_PHONE_NUMBER
+        if acct and tok and frm:
+            try:
+                res = send_sms_with_retry(acct, tok, frm, to_phone, data.body)
+                external_id = getattr(res, "sid", "")
+            except Exception as e:
+                logger.error(f"Inbox SMS send failed: {e}")
+        else:
+            logger.warning("Inbox: Twilio not configured — message logged locally only")
+        msg = await _log_inbox_message(uid, contact_id, "sms", "outbound",
+                                       data.body, from_addr=frm or "",
+                                       to_addr=to_phone, external_id=external_id)
+        await db.activities.insert_one({
+            "contact_id": contact_id, "user_id": uid,
+            "activity_type": "sms",
+            "description": f"Sent SMS: {data.body[:80]}",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        background_tasks.add_task(trigger_webhooks, uid, "sms_sent",
+                                  {"contact_id": contact_id, "message": data.body[:80]})
+
+    # Clear draft if any
+    await db.inbox_drafts.delete_one({"user_id": uid, "contact_id": contact_id})
+    return {"success": True, "message": msg}
+
+
+@api_router.post("/inbox/threads/{contact_id}/read")
+async def mark_thread_read(contact_id: str, user=Depends(get_any_auth_user)):
+    uid = user["_id"]
+    await db.messages.update_many(
+        {"user_id": uid, "contact_id": contact_id, "direction": "inbound", "read": False},
+        {"$set": {"read": True}},
+    )
+    return {"success": True}
+
+
+@api_router.post("/inbox/threads/{contact_id}/assign")
+async def assign_thread(contact_id: str, user=Depends(get_any_auth_user)):
+    """Assign the thread to the current user (toggles unassign if already assigned)."""
+    uid = user["_id"]
+    await _ensure_thread_meta(uid, contact_id)
+    meta = await db.inbox_threads.find_one({"user_id": uid, "contact_id": contact_id})
+    new_assignee = None if (meta or {}).get("assigned_to") == uid else uid
+    await db.inbox_threads.update_one(
+        {"user_id": uid, "contact_id": contact_id},
+        {"$set": {"assigned_to": new_assignee,
+                  "last_updated": datetime.now(timezone.utc).isoformat()}},
+    )
+    return {"assigned_to": new_assignee}
+
+
+@api_router.post("/inbox/threads/{contact_id}/close")
+async def close_thread(contact_id: str, user=Depends(get_any_auth_user)):
+    """Toggle thread open/closed."""
+    uid = user["_id"]
+    await _ensure_thread_meta(uid, contact_id)
+    meta = await db.inbox_threads.find_one({"user_id": uid, "contact_id": contact_id})
+    new_status = "open" if (meta or {}).get("status") == "closed" else "closed"
+    await db.inbox_threads.update_one(
+        {"user_id": uid, "contact_id": contact_id},
+        {"$set": {"status": new_status,
+                  "last_updated": datetime.now(timezone.utc).isoformat()}},
+    )
+    return {"status": new_status}
+
+
+@api_router.put("/inbox/drafts")
+async def upsert_draft(data: InboxDraftRequest, user=Depends(get_any_auth_user)):
+    uid = user["_id"]
+    if not data.body and not data.subject:
+        # Delete if empty
+        await db.inbox_drafts.delete_one({"user_id": uid, "contact_id": data.contact_id})
+        return {"success": True, "deleted": True}
+    now = datetime.now(timezone.utc).isoformat()
+    await db.inbox_drafts.update_one(
+        {"user_id": uid, "contact_id": data.contact_id},
+        {"$set": {
+            "user_id": uid,
+            "contact_id": data.contact_id,
+            "channel": data.channel,
+            "subject": data.subject or "",
+            "body": data.body or "",
+            "updated_at": now,
+        }},
+        upsert=True,
+    )
+    return {"success": True}
+
+
+@api_router.delete("/inbox/drafts/{contact_id}")
+async def delete_draft(contact_id: str, user=Depends(get_any_auth_user)):
+    uid = user["_id"]
+    await db.inbox_drafts.delete_one({"user_id": uid, "contact_id": contact_id})
+    return {"success": True}
+
+
+@api_router.post("/inbox/seed-demo")
+async def seed_inbox_demo(user=Depends(get_any_auth_user)):
+    """Populate the inbox with demo inbound emails/SMS/voicemails across existing contacts."""
+    uid = user["_id"]
+    contacts = await db.contacts.find({"user_id": uid}).limit(12).to_list(12)
+    if not contacts:
+        return {"created": 0, "detail": "No contacts found; create contacts first."}
+
+    # Delete any pre-existing demo messages for a clean reseed
+    await db.messages.delete_many({"user_id": uid, "external_id": "demo"})
+
+    templates = [
+        ("email", "inbound",  "Question about the 2-bedroom listing", "Hi! I saw the listing on StreetEasy and I'm really interested. Is it still available for a June move-in? Also — are pets allowed? Thanks!"),
+        ("sms",   "inbound",  "", "Hey, just confirming tomorrow's showing at 4pm — anything I should bring?"),
+        ("email", "inbound",  "Renewal — lease question", "Hi, my lease is up in 45 days. Can we chat about renewal options? I'd love to stay if the rent doesn't jump too much."),
+        ("email", "outbound", "Re: Question about the 2-bedroom listing", "Hi! Yes, the unit is still available and we welcome cats/small dogs. I've attached the application — happy to set up a tour this week."),
+        ("sms",   "outbound", "", "Sure! Just bring a photo ID and proof of income. See you at 4."),
+        ("voicemail", "inbound", "Voicemail (0:42)", "Hi this is Sam — calling about the application I submitted yesterday. Wanted to see if there's anything else you need from me. Thanks!"),
+        ("email", "inbound",  "Maintenance follow-up", "Thanks for sending the plumber last week. Everything's working great now — appreciate the quick turnaround."),
+        ("sms",   "inbound",  "", "Do you have any 1BRs coming up in Brooklyn under $3k? Moving date is flexible."),
+    ]
+
+    now = datetime.now(timezone.utc)
+    created = 0
+    for idx, contact in enumerate(contacts):
+        cid = str(contact["_id"])
+        # Seed 1-3 messages per contact (rotating through templates)
+        n_msgs = 2 + (idx % 2)
+        for j in range(n_msgs):
+            tpl = templates[(idx + j) % len(templates)]
+            channel, direction, subject, body = tpl
+            ts = (now - timedelta(hours=(idx * 3) + j, minutes=idx * 7)).isoformat()
+            await db.messages.insert_one({
+                "user_id": uid,
+                "contact_id": cid,
+                "channel": channel,
+                "direction": direction,
+                "subject": subject,
+                "body": body,
+                "from_addr": contact.get("email", "") if direction == "inbound" else "",
+                "to_addr": contact.get("email", "") if direction == "outbound" else "",
+                "external_id": "demo",
+                "read": direction == "outbound",
+                "created_at": ts,
+            })
+            created += 1
+        # Ensure thread meta exists
+        await _ensure_thread_meta(uid, cid)
+        await db.inbox_threads.update_one(
+            {"user_id": uid, "contact_id": cid},
+            {"$set": {"last_message_at": now.isoformat()}},
+        )
+
+    return {"created": created, "contacts": len(contacts)}
+
+
+# ── Inbox indexes ──
+async def create_inbox_indexes():
+    await db.messages.create_index([("user_id", 1), ("contact_id", 1), ("created_at", -1)], background=True)
+    await db.messages.create_index([("user_id", 1), ("direction", 1), ("read", 1)], background=True)
+    await db.messages.create_index([("user_id", 1), ("channel", 1)], background=True)
+    await db.inbox_threads.create_index([("user_id", 1), ("contact_id", 1)], unique=True, background=True)
+    await db.inbox_threads.create_index([("user_id", 1), ("status", 1)], background=True)
+    await db.inbox_drafts.create_index([("user_id", 1), ("contact_id", 1)], unique=True, background=True)
+
 
 app.include_router(api_router)
 

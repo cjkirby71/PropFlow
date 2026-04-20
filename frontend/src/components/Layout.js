@@ -3,7 +3,7 @@ import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
 import {
-  LayoutDashboard, Users, Building2, Kanban, CheckSquare, Settings, LogOut, Menu, X, Sparkles, Search, CalendarDays, FileText, TrendingUp, Zap, Moon, Sun, Command
+  LayoutDashboard, Users, Building2, Kanban, CheckSquare, Settings, LogOut, Menu, X, Sparkles, Search, CalendarDays, FileText, TrendingUp, Zap, Moon, Sun, Command, Inbox as InboxIcon
 } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -12,6 +12,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../com
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/contacts', icon: Users, label: 'Contacts' },
+  { to: '/inbox', icon: InboxIcon, label: 'Inbox' },
   { to: '/pipeline', icon: Kanban, label: 'Pipeline' },
   { to: '/properties', icon: Building2, label: 'Properties' },
   { to: '/tasks', icon: CheckSquare, label: 'Tasks' },

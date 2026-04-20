@@ -19,6 +19,7 @@ import TemplatesPage from './pages/TemplatesPage';
 import SettingsPage from './pages/SettingsPage';
 import SequencesPage from './pages/SequencesPage';
 import AnalyticsPage from './pages/AnalyticsPage';
+import InboxPage from './pages/InboxPage';
 import { Toaster } from './components/ui/sonner';
 
 function ProtectedRoute({ children }) {
@@ -56,6 +57,7 @@ function App() {
                   <Route index element={<DashboardPage />} />
                   <Route path="contacts" element={<ContactsPage />} />
                   <Route path="contacts/:id" element={<ContactDetailPage />} />
+                  <Route path="inbox" element={<InboxPage />} />
                   <Route path="pipeline" element={<PipelinePage />} />
                   <Route path="properties" element={<PropertiesPage />} />
                   <Route path="tasks" element={<TasksPage />} />
