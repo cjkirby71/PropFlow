@@ -567,11 +567,16 @@ class DealUpdate(BaseModel):
 class TaskCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=300)
     description: Optional[str] = Field(default="", max_length=5000)
-    due_date: Optional[str] = Field(default="", max_length=20)
+    due_date: Optional[str] = Field(default="", max_length=30)
     contact_id: Optional[str] = Field(default="", max_length=50)
     deal_id: Optional[str] = Field(default="", max_length=50)
+    property_id: Optional[str] = Field(default="", max_length=50)
     priority: Optional[str] = Field(default="medium", max_length=10)
     completed: Optional[bool] = False
+    # ── Phase 15 leasing extensions (all optional, backward-compatible) ──
+    task_type: Optional[str] = Field(default="other", max_length=40)
+    assigned_to: Optional[str] = Field(default="", max_length=50)
+    all_day: Optional[bool] = False
 
     @field_validator("priority")
     @classmethod
@@ -579,6 +584,18 @@ class TaskCreate(BaseModel):
         if v and v not in ("high", "medium", "low"):
             raise ValueError("priority must be 'high', 'medium', or 'low'")
         return v
+
+    @field_validator("task_type")
+    @classmethod
+    def validate_task_type(cls, v):
+        allowed = (
+            "tour_followup", "renewal_offer", "maintenance_request",
+            "application_reminder", "showing_prep", "listing_outreach",
+            "lease_signing", "move_in", "rent_reminder", "other",
+        )
+        if v and v not in allowed:
+            raise ValueError(f"task_type must be one of: {', '.join(allowed)}")
+        return v or "other"
 
 class ActivityCreate(BaseModel):
     contact_id: str = Field(..., max_length=50)
@@ -1911,6 +1928,298 @@ async def delete_task(task_id: str, user=Depends(get_any_auth_user)):
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Task not found")
     return {"message": "Task deleted"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHASE 15 — TASKS PAGE (FUB-parity)
+# Adds: counts (today/overdue/future), bulk ops, complete+log, task types
+# ═══════════════════════════════════════════════════════════════════════════════
+
+VALID_TASK_TYPES = (
+    "tour_followup", "renewal_offer", "maintenance_request",
+    "application_reminder", "showing_prep", "listing_outreach",
+    "lease_signing", "move_in", "rent_reminder", "other",
+)
+
+
+def _today_bounds_iso():
+    """Return (start_of_today, start_of_tomorrow) ISO strings in UTC."""
+    now = datetime.now(timezone.utc)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return start.isoformat(), end.isoformat()
+
+
+def _infer_task_type(title: str, description: str = "") -> str:
+    """Best-effort inference from stage-automation defaults (backward compat)."""
+    t = f"{title} {description}".lower()
+    if "tour" in t or "showing" in t:
+        return "tour_followup"
+    if "renew" in t:
+        return "renewal_offer"
+    if "maintenance" in t or "repair" in t or "ticket" in t:
+        return "maintenance_request"
+    if "application" in t or "review application" in t:
+        return "application_reminder"
+    if "lease" in t and ("sign" in t or "paperwork" in t):
+        return "lease_signing"
+    if "move-in" in t or "move in" in t:
+        return "move_in"
+    if "rent" in t:
+        return "rent_reminder"
+    return "other"
+
+
+def _task_assignee_filter(uid: str, assignee: str) -> dict:
+    if assignee == "me":
+        return {"$or": [{"assigned_to": uid}, {"assigned_to": {"$in": ["", None]}}]}
+    if assignee == "team":
+        return {"assigned_to": {"$nin": ["", None, uid]}}
+    # 'everyone' or empty
+    return {}
+
+
+@api_router.get("/tasks/counts")
+async def tasks_counts(
+    user=Depends(get_any_auth_user),
+    assignee: str = "me",
+    task_type: str = "",
+):
+    """Counts for Today / Overdue / Future / Completed tabs."""
+    uid = user["_id"]
+    start_today, end_today = _today_bounds_iso()
+    base = {"user_id": uid}
+    assignee_f = _task_assignee_filter(uid, assignee)
+    if assignee_f:
+        base.update(assignee_f)
+    if task_type:
+        base["task_type"] = task_type
+
+    today = await db.tasks.count_documents({
+        **base, "completed": False,
+        "due_date": {"$gte": start_today, "$lt": end_today},
+    })
+    overdue = await db.tasks.count_documents({
+        **base, "completed": False,
+        "due_date": {"$gt": "", "$lt": start_today},
+    })
+    future = await db.tasks.count_documents({
+        **base, "completed": False,
+        "due_date": {"$gte": end_today},
+    })
+    completed = await db.tasks.count_documents({**base, "completed": True})
+    return {"today": today, "overdue": overdue, "future": future, "completed": completed}
+
+
+@api_router.get("/tasks/bucket")
+async def tasks_bucket(
+    user=Depends(get_any_auth_user),
+    bucket: str = "today",
+    assignee: str = "me",
+    task_type: str = "",
+    limit: int = 200,
+):
+    """Return tasks for a Today/Overdue/Future/Completed bucket, pre-sorted."""
+    uid = user["_id"]
+    start_today, end_today = _today_bounds_iso()
+    q = {"user_id": uid}
+    assignee_f = _task_assignee_filter(uid, assignee)
+    if assignee_f:
+        q.update(assignee_f)
+    if task_type:
+        q["task_type"] = task_type
+
+    sort_field, sort_order = "due_date", 1
+    if bucket == "overdue":
+        q.update({"completed": False, "due_date": {"$gt": "", "$lt": start_today}})
+        sort_order = -1  # most recently-overdue first
+    elif bucket == "future":
+        q.update({"completed": False, "due_date": {"$gte": end_today}})
+    elif bucket == "completed":
+        q["completed"] = True
+        sort_field, sort_order = "updated_at", -1
+    else:  # today (default)
+        q.update({"completed": False, "due_date": {"$gte": start_today, "$lt": end_today}})
+
+    limit = max(1, min(limit, 500))
+    cursor = db.tasks.find(q).sort(sort_field, sort_order).limit(limit)
+    tasks = [serialize_doc(t) async for t in cursor]
+    # Enrich inferred task_type for legacy rows lacking it
+    for t in tasks:
+        if not t.get("task_type"):
+            t["task_type"] = _infer_task_type(t.get("title", ""), t.get("description", ""))
+    return {"tasks": tasks}
+
+
+class TaskCompleteLogRequest(BaseModel):
+    activity_type: Optional[str] = Field(default="note", max_length=20)
+    note: Optional[str] = Field(default="", max_length=5000)
+
+    @field_validator("activity_type")
+    @classmethod
+    def validate_activity_type(cls, v):
+        allowed = ("call", "email", "note", "meeting", "sms")
+        if v and v not in allowed:
+            raise ValueError(f"activity_type must be one of: {', '.join(allowed)}")
+        return v or "note"
+
+
+@api_router.post("/tasks/{task_id}/complete-and-log")
+async def task_complete_and_log(task_id: str, data: TaskCompleteLogRequest, user=Depends(get_any_auth_user)):
+    """Mark task complete AND log an activity on the linked contact in one call."""
+    tid = validate_object_id(task_id, "Task")
+    task = await db.tasks.find_one({"_id": tid, "user_id": user["_id"]})
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    now = datetime.now(timezone.utc).isoformat()
+    await db.tasks.update_one(
+        {"_id": tid},
+        {"$set": {"completed": True, "completed_at": now, "updated_at": now}},
+    )
+    if task.get("contact_id"):
+        await db.activities.insert_one({
+            "contact_id": task["contact_id"],
+            "user_id": user["_id"],
+            "activity_type": data.activity_type,
+            "description": data.note or f"Completed task: {task.get('title', '')}",
+            "deal_id": task.get("deal_id", ""),
+            "created_at": now,
+        })
+    return {"success": True}
+
+
+class TaskBulkRequest(BaseModel):
+    task_ids: List[str]
+    action: str = Field(..., max_length=30)
+    # action-specific payload
+    due_date: Optional[str] = Field(default=None, max_length=30)
+    assigned_to: Optional[str] = Field(default=None, max_length=50)
+    sequence_id: Optional[str] = Field(default=None, max_length=50)
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, v):
+        allowed = ("complete", "reschedule", "assign", "add_to_sequence", "delete")
+        if v not in allowed:
+            raise ValueError(f"action must be one of: {', '.join(allowed)}")
+        return v
+
+
+@api_router.post("/tasks/bulk")
+async def tasks_bulk(data: TaskBulkRequest, user=Depends(get_any_auth_user)):
+    """Perform a bulk operation on a set of task IDs."""
+    oids = []
+    for tid in data.task_ids[:500]:
+        try:
+            oids.append(ObjectId(tid))
+        except Exception:
+            continue
+    if not oids:
+        raise HTTPException(status_code=400, detail="No valid task IDs provided")
+
+    flt = {"_id": {"$in": oids}, "user_id": user["_id"]}
+    now = datetime.now(timezone.utc).isoformat()
+    affected = 0
+
+    if data.action == "complete":
+        res = await db.tasks.update_many(flt, {"$set": {"completed": True, "completed_at": now, "updated_at": now}})
+        affected = res.modified_count
+        # log a lightweight activity per task with a contact_id
+        tasks = await db.tasks.find(flt).to_list(500)
+        acts = [
+            {
+                "contact_id": t["contact_id"], "user_id": user["_id"],
+                "activity_type": "note",
+                "description": f"Completed task: {t.get('title', '')}",
+                "deal_id": t.get("deal_id", ""),
+                "created_at": now,
+            } for t in tasks if t.get("contact_id")
+        ]
+        if acts:
+            await db.activities.insert_many(acts)
+
+    elif data.action == "reschedule":
+        if not data.due_date:
+            raise HTTPException(status_code=400, detail="due_date is required for reschedule")
+        res = await db.tasks.update_many(flt, {"$set": {"due_date": data.due_date, "updated_at": now}})
+        affected = res.modified_count
+
+    elif data.action == "assign":
+        res = await db.tasks.update_many(flt, {"$set": {"assigned_to": data.assigned_to or "", "updated_at": now}})
+        affected = res.modified_count
+
+    elif data.action == "add_to_sequence":
+        if not data.sequence_id:
+            raise HTTPException(status_code=400, detail="sequence_id is required")
+        seq = await db.sequences.find_one({"_id": validate_object_id(data.sequence_id, "Sequence"), "user_id": user["_id"]})
+        if not seq:
+            raise HTTPException(status_code=404, detail="Sequence not found")
+        tasks = await db.tasks.find(flt).to_list(500)
+        contact_ids = {t.get("contact_id") for t in tasks if t.get("contact_id")}
+        for cid in contact_ids:
+            await db.sequence_executions.insert_one({
+                "user_id": user["_id"],
+                "sequence_id": data.sequence_id,
+                "contact_id": cid,
+                "status": "pending",
+                "next_step": 0,
+                "next_run_at": now,
+                "created_at": now,
+            })
+        affected = len(contact_ids)
+
+    elif data.action == "delete":
+        res = await db.tasks.delete_many(flt)
+        affected = res.deleted_count
+
+    return {"success": True, "affected": affected, "action": data.action}
+
+
+@api_router.post("/tasks/seed-demo")
+async def tasks_seed_demo(user=Depends(get_any_auth_user)):
+    """Populate a handful of realistic leasing tasks for demo / empty-state."""
+    uid = user["_id"]
+    await db.tasks.delete_many({"user_id": uid, "seed": "demo"})
+    contacts = await db.contacts.find({"user_id": uid}).limit(8).to_list(8)
+    if not contacts:
+        return {"created": 0, "detail": "No contacts found"}
+    props = await db.properties.find({"user_id": uid}).limit(5).to_list(5)
+    now = datetime.now(timezone.utc)
+    templates = [
+        ("tour_followup",        "Follow up on 2BR tour",             "Confirm next steps after yesterday's showing.",   0,  "high"),
+        ("renewal_offer",        "Send renewal offer",                "Prepare 12-mo renewal with 3% increase.",         1,  "high"),
+        ("maintenance_request",  "Check on plumbing ticket",          "Tenant reported a leak; confirm plumber ETA.",    0,  "medium"),
+        ("application_reminder", "Application review deadline",       "Review Smith application before EOD.",            0,  "high"),
+        ("showing_prep",         "Prepare keys for 4pm showing",      "Unit 3B — collect lockbox code.",                 0,  "medium"),
+        ("listing_outreach",     "Outreach to StreetEasy lead",       "New inquiry — send listing pack & book tour.",    2,  "medium"),
+        ("rent_reminder",        "Follow up on late rent",            "Past due 3 days — send courtesy reminder.",       -1, "medium"),
+        ("lease_signing",        "Send lease for e-signature",        "Prepare and send 12-mo lease for counter-sign.",  3,  "high"),
+        ("move_in",              "Move-in walkthrough checklist",     "Prep move-in packet + utilities transfer form.", 5,  "low"),
+        ("tour_followup",        "Yesterday's tour — send recap",     "Recap property features + availability.",        -2, "high"),
+    ]
+    created = 0
+    for idx, (tt, title, desc, day_offset, prio) in enumerate(templates):
+        contact = contacts[idx % len(contacts)]
+        prop = props[idx % len(props)] if props else None
+        due = (now + timedelta(days=day_offset, hours=(14 + idx) % 24))
+        await db.tasks.insert_one({
+            "user_id": uid,
+            "title": title,
+            "description": desc,
+            "due_date": due.isoformat(),
+            "contact_id": str(contact["_id"]),
+            "deal_id": "",
+            "property_id": str(prop["_id"]) if prop else "",
+            "priority": prio,
+            "completed": False,
+            "task_type": tt,
+            "assigned_to": uid,
+            "all_day": False,
+            "created_at": now.isoformat(),
+            "seed": "demo",
+        })
+        created += 1
+    return {"created": created}
 
 # ─── Activities Routes ───
 @api_router.post("/activities")

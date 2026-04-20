@@ -249,6 +249,70 @@ export function useDeleteTask() {
   });
 }
 
+// ── Phase 15: Tasks page (FUB-parity) ──
+export function useTaskCounts({ assignee = 'me', taskType = '' } = {}) {
+  return useQuery({
+    queryKey: ['task-counts', { assignee, taskType }],
+    queryFn: async () => {
+      const params = { assignee };
+      if (taskType) params.task_type = taskType;
+      return (await api.get('/tasks/counts', { params })).data;
+    },
+    staleTime: 15 * 1000,
+    refetchInterval: 60 * 1000,
+  });
+}
+
+export function useTaskBucket({ bucket = 'today', assignee = 'me', taskType = '' } = {}) {
+  return useQuery({
+    queryKey: ['task-bucket', { bucket, assignee, taskType }],
+    queryFn: async () => {
+      const params = { bucket, assignee };
+      if (taskType) params.task_type = taskType;
+      const res = await api.get('/tasks/bucket', { params });
+      return res.data.tasks || [];
+    },
+    staleTime: 10 * 1000,
+    keepPreviousData: true,
+  });
+}
+
+export function useCompleteAndLog() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...body }) => api.post(`/tasks/${id}/complete-and-log`, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['task-counts'] });
+      qc.invalidateQueries({ queryKey: ['task-bucket'] });
+      qc.invalidateQueries({ queryKey: ['tasks'] });
+      qc.invalidateQueries({ queryKey: ['activities'] });
+    },
+  });
+}
+
+export function useTasksBulk() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data) => api.post('/tasks/bulk', data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['task-counts'] });
+      qc.invalidateQueries({ queryKey: ['task-bucket'] });
+      qc.invalidateQueries({ queryKey: ['tasks'] });
+    },
+  });
+}
+
+export function useSeedTasksDemo() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post('/tasks/seed-demo'),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['task-counts'] });
+      qc.invalidateQueries({ queryKey: ['task-bucket'] });
+    },
+  });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ACTIVITIES
 // ─────────────────────────────────────────────────────────────────────────────
