@@ -313,6 +313,34 @@ export function useSeedTasksDemo() {
   });
 }
 
+// ── Phase 17: Org / Admin settings ──
+export function useOrgSettings() {
+  return useQuery({
+    queryKey: ['org-settings'],
+    queryFn: async () => (await api.get('/settings')).data,
+    staleTime: 30 * 1000,
+  });
+}
+
+export function useUpdateOrgSettings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data) => api.put('/settings', data),
+    onSuccess: (res) => {
+      qc.setQueryData(['org-settings'], res.data);
+      qc.invalidateQueries({ queryKey: ['auth', 'me'] });
+    },
+  });
+}
+
+export function useSettingsSummary() {
+  return useQuery({
+    queryKey: ['settings-summary'],
+    queryFn: async () => (await api.get('/settings/summary')).data,
+    staleTime: 60 * 1000,
+  });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ACTIVITIES
 // ─────────────────────────────────────────────────────────────────────────────

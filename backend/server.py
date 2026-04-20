@@ -2221,6 +2221,135 @@ async def tasks_seed_demo(user=Depends(get_any_auth_user)):
         created += 1
     return {"created": created}
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHASE 17 — ORG / ADMIN SETTINGS
+# One settings doc per user (single-tenant). Stores company info, lead-flow
+# rules, renewal defaults, custom fields/tags, maintenance types.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+DEFAULT_ORG_SETTINGS = {
+    "company": {
+        "name": "",
+        "business_registration": "",
+        "address": "",
+        "phone": "",
+        "website": "",
+        "logo_url": "",
+    },
+    "lead_flow": {
+        "round_robin_enabled": False,
+        "strategy": "least_busy",  # least_busy | random | weighted
+        "business_hours_only": True,
+        "business_hours_start": "09:00",
+        "business_hours_end": "18:00",
+        "weekend_assignment": False,
+        "fallback_user_id": "",
+    },
+    "renewals": {
+        "default_sequence_id": "",
+        "default_notice_days": 60,
+        "rent_increase_percent": 3.0,
+        "auto_send_offer": False,
+        "retention_target_score": 70,
+    },
+    "custom_fields": [],       # [{id, label, type, entity, required}]
+    "tags": [],                # [{id, name, color, entity}]
+    "maintenance_types": [     # seeded defaults
+        {"id": "plumbing",   "name": "Plumbing",   "sla_hours": 24, "color": "sky"},
+        {"id": "electrical", "name": "Electrical", "sla_hours": 24, "color": "amber"},
+        {"id": "hvac",       "name": "HVAC",       "sla_hours": 48, "color": "indigo"},
+        {"id": "appliance",  "name": "Appliance",  "sla_hours": 72, "color": "emerald"},
+        {"id": "pest",       "name": "Pest",       "sla_hours": 24, "color": "rose"},
+        {"id": "general",    "name": "General",    "sla_hours": 72, "color": "slate"},
+    ],
+    "renewal_templates": [],   # [{id, name, body}]
+}
+
+
+def _merge_settings(stored: Optional[dict]) -> dict:
+    """Return a complete settings doc by merging defaults with stored."""
+    import copy
+    out = copy.deepcopy(DEFAULT_ORG_SETTINGS)
+    if not stored:
+        return out
+    for k, default_val in DEFAULT_ORG_SETTINGS.items():
+        val = stored.get(k)
+        if val is None:
+            continue
+        if isinstance(default_val, dict):
+            merged = dict(default_val)
+            merged.update({kk: vv for kk, vv in val.items() if vv is not None})
+            out[k] = merged
+        else:
+            out[k] = val
+    return out
+
+
+class OrgSettingsUpdate(BaseModel):
+    company: Optional[dict] = None
+    lead_flow: Optional[dict] = None
+    renewals: Optional[dict] = None
+    custom_fields: Optional[List[dict]] = None
+    tags: Optional[List[dict]] = None
+    maintenance_types: Optional[List[dict]] = None
+    renewal_templates: Optional[List[dict]] = None
+
+
+@api_router.get("/settings")
+async def get_org_settings(user=Depends(get_any_auth_user)):
+    stored = await db.org_settings.find_one({"user_id": user["_id"]})
+    # Sync lead_flow.round_robin_enabled with users.auto_assign (existing feature)
+    u = await db.users.find_one({"_id": ObjectId(user["_id"])})
+    merged = _merge_settings(stored)
+    merged["lead_flow"]["round_robin_enabled"] = bool((u or {}).get("auto_assign", False))
+    return merged
+
+
+@api_router.put("/settings")
+async def update_org_settings(data: OrgSettingsUpdate, user=Depends(get_any_auth_user)):
+    payload = data.model_dump(exclude_none=True)
+    now = datetime.now(timezone.utc).isoformat()
+    # Keep auto_assign on users in sync for backward-compat with existing flows
+    if "lead_flow" in payload and "round_robin_enabled" in payload["lead_flow"]:
+        await db.users.update_one(
+            {"_id": ObjectId(user["_id"])},
+            {"$set": {"auto_assign": bool(payload["lead_flow"]["round_robin_enabled"])}},
+        )
+    set_ops = {f"{k}": v for k, v in payload.items()}
+    set_ops["updated_at"] = now
+    await db.org_settings.update_one(
+        {"user_id": user["_id"]},
+        {"$set": set_ops, "$setOnInsert": {"user_id": user["_id"], "created_at": now}},
+        upsert=True,
+    )
+    stored = await db.org_settings.find_one({"user_id": user["_id"]})
+    return _merge_settings(stored)
+
+
+@api_router.get("/settings/summary")
+async def settings_summary(user=Depends(get_any_auth_user)):
+    """Lightweight counts for the Overview tab."""
+    uid = user["_id"]
+    team = await db.users.count_documents({})  # single-tenant: all users are team
+    properties = await db.properties.count_documents({"user_id": uid})
+    sequences = await db.sequences.count_documents({"user_id": uid})
+    active_sequences = await db.sequences.count_documents({"user_id": uid, "active": True})
+    templates = await db.templates.count_documents({"user_id": uid})
+    webhooks = await db.webhooks.count_documents({"user_id": uid, "active": True})
+    api_keys = await db.api_keys.count_documents({"user_id": uid, "active": True})
+    contacts = await db.contacts.count_documents({"user_id": uid})
+    return {
+        "team_members": team,
+        "properties": properties,
+        "sequences": sequences,
+        "active_sequences": active_sequences,
+        "templates": templates,
+        "webhooks": webhooks,
+        "api_keys": api_keys,
+        "contacts": contacts,
+    }
+
 # ─── Activities Routes ───
 @api_router.post("/activities")
 async def create_activity(data: ActivityCreate, user=Depends(get_any_auth_user)):
