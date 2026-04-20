@@ -2,7 +2,7 @@
 from config import settings
 
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, BackgroundTasks
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
@@ -2287,6 +2287,7 @@ def _merge_settings(stored: Optional[dict]) -> dict:
 
 
 class OrgSettingsUpdate(BaseModel):
+    plan: Optional[str] = None
     company: Optional[dict] = None
     lead_flow: Optional[dict] = None
     renewals: Optional[dict] = None
@@ -2294,6 +2295,8 @@ class OrgSettingsUpdate(BaseModel):
     tags: Optional[List[dict]] = None
     maintenance_types: Optional[List[dict]] = None
     renewal_templates: Optional[List[dict]] = None
+    brokerage_sheet: Optional[dict] = None
+    benchmarks: Optional[dict] = None
 
 
 @api_router.get("/settings")
@@ -4711,6 +4714,7 @@ async def startup():
     # ── Start background sequence polling worker ──
     asyncio.create_task(process_sequence_executions())
     logger.info("Sequence polling worker started")
+    asyncio.create_task(brokerage_sheet_sync_worker())
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PHASE 14 — UNIFIED INBOX (Email + SMS + Voicemail)
@@ -5218,6 +5222,531 @@ async def create_inbox_indexes():
     await db.inbox_threads.create_index([("user_id", 1), ("contact_id", 1)], unique=True, background=True)
     await db.inbox_threads.create_index([("user_id", 1), ("status", 1)], background=True)
     await db.inbox_drafts.create_index([("user_id", 1), ("contact_id", 1)], unique=True, background=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHASE 19 — BROKERAGE PRE-LEASE GOOGLE SHEET (admin-only, Brokerage Pro plan)
+# Graceful-no-keys mode: all endpoints work and the background worker runs;
+# the OAuth + Sheets-API calls degrade to a clear "Connect Google Sheets" state
+# when GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are missing.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import secrets as _secrets
+
+# Lazy-imported inside helpers so missing libs don't break startup
+def _sheets_libs_available() -> bool:
+    try:
+        import google_auth_oauthlib.flow  # noqa: F401
+        import googleapiclient.discovery  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _sheets_keys_configured() -> bool:
+    return bool(settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET)
+
+
+SHEETS_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive.file",
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+]
+
+LIVE_LISTINGS_TAB = "Live Listings"
+LIVE_LISTINGS_HEADERS = [
+    "Property Name", "Unit #", "Address", "Rent", "Availability Date",
+    "Status", "Proximity to Campus", "Bus Routes", "Pet Policy",
+    "Last Updated", "Listing Agent",
+]
+BROKERAGE_PRO_PLANS = ("brokerage_pro", "enterprise")
+
+
+def _redirect_uri() -> str:
+    return settings.FRONTEND_URL.rstrip("/") + "/api/oauth/google-sheets/callback"
+
+
+async def _is_brokerage_pro(user_id: str) -> bool:
+    """Current plan comes from org_settings.plan; default 'free'. Also
+    honour a dev override `BROKERAGE_PRO_DEV` env var for local testing."""
+    if os.environ.get("BROKERAGE_PRO_DEV") == "1":
+        return True
+    doc = await db.org_settings.find_one({"user_id": user_id}) or {}
+    plan = (doc.get("plan") or "free").lower()
+    return plan in BROKERAGE_PRO_PLANS
+
+
+async def _require_brokerage_admin(user: dict) -> None:
+    if (user.get("role") or "").lower() != "admin":
+        raise HTTPException(status_code=403, detail="Brokerage admin role required")
+    if not await _is_brokerage_pro(user["_id"]):
+        raise HTTPException(status_code=402, detail="Brokerage Pro plan required")
+
+
+def _client_config() -> dict:
+    return {
+        "web": {
+            "client_id": settings.GOOGLE_CLIENT_ID,
+            "client_secret": settings.GOOGLE_CLIENT_SECRET,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [_redirect_uri()],
+        }
+    }
+
+
+async def _load_sheets_creds(user_id: str):
+    """Return google.oauth2.credentials.Credentials (auto-refreshed), or None."""
+    if not _sheets_keys_configured() or not _sheets_libs_available():
+        return None
+    doc = await db.google_tokens.find_one({"user_id": user_id, "scope_set": "sheets"})
+    if not doc or not doc.get("refresh_token"):
+        return None
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request as GoogleRequest
+
+    creds = Credentials(
+        token=doc.get("access_token"),
+        refresh_token=doc.get("refresh_token"),
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=settings.GOOGLE_CLIENT_ID,
+        client_secret=settings.GOOGLE_CLIENT_SECRET,
+        scopes=SHEETS_SCOPES,
+    )
+    exp = doc.get("expires_at")
+    needs_refresh = True
+    try:
+        if exp:
+            needs_refresh = datetime.fromisoformat(exp.replace("Z", "+00:00")) <= datetime.now(timezone.utc)
+    except Exception:
+        needs_refresh = True
+    if needs_refresh:
+        try:
+            await asyncio.to_thread(creds.refresh, GoogleRequest())
+            await db.google_tokens.update_one(
+                {"user_id": user_id, "scope_set": "sheets"},
+                {"$set": {
+                    "access_token": creds.token,
+                    "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=55)).isoformat(),
+                }},
+            )
+        except Exception as e:
+            logger.warning(f"Sheets token refresh failed for user={user_id}: {e}")
+            return None
+    return creds
+
+
+def _build_sheets_service(creds):
+    from googleapiclient.discovery import build
+    return build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+
+def _build_drive_service(creds):
+    from googleapiclient.discovery import build
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+async def _brokerage_active_listings(admin_uid: str) -> list:
+    """Aggregate all active listings across every active user (brokerage scope).
+    For single-tenant deployments, this means every user in the DB; when a
+    `brokerage_id` field exists on users, we scope to that admin's brokerage."""
+    admin = await db.users.find_one({"_id": ObjectId(admin_uid)})
+    brokerage_id = (admin or {}).get("brokerage_id") or admin_uid
+    user_filter = {"$or": [{"brokerage_id": brokerage_id}, {"_id": ObjectId(admin_uid)}]}
+    user_ids = set()
+    async for u in db.users.find(user_filter, {"_id": 1}):
+        user_ids.add(str(u["_id"]))
+    # Fallback: if only the admin is matched (no brokerage_id seeded), include all users
+    if len(user_ids) <= 1:
+        async for u in db.users.find({}, {"_id": 1}):
+            user_ids.add(str(u["_id"]))
+
+    # Fetch user display names
+    name_map = {}
+    for uid in user_ids:
+        try:
+            u = await db.users.find_one({"_id": ObjectId(uid)}, {"name": 1, "email": 1})
+            name_map[uid] = (u or {}).get("name") or (u or {}).get("email") or "Agent"
+        except Exception:
+            name_map[uid] = "Agent"
+
+    rows = []
+    async for p in db.properties.find({
+        "user_id": {"$in": list(user_ids)},
+        "status": "active",
+    }).sort("updated_at", -1):
+        rows.append([
+            p.get("name", "") or p.get("title", "") or "",
+            p.get("unit", "") or p.get("unit_number", "") or "",
+            p.get("address", "") or "",
+            _fmt_money(p.get("price", 0) or p.get("rent", 0)),
+            p.get("availability_date", "") or p.get("available_from", ""),
+            (p.get("status") or "active").title(),
+            p.get("proximity_to_campus", "") or p.get("campus_proximity", ""),
+            p.get("bus_routes", "") or p.get("transit", ""),
+            p.get("pet_policy", "") or ("Pets OK" if p.get("pets_allowed") else "No pets"),
+            _fmt_date(p.get("updated_at") or p.get("created_at", "")),
+            name_map.get(str(p.get("user_id") or ""), "Agent"),
+        ])
+    return rows
+
+
+def _fmt_money(v) -> str:
+    try:
+        return f"${float(v):,.0f}"
+    except Exception:
+        return ""
+
+
+def _fmt_date(v: str) -> str:
+    if not v:
+        return ""
+    try:
+        d = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        return d.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(v)[:16]
+
+
+async def _create_brokerage_sheet(admin_uid: str) -> dict:
+    """Create the spreadsheet + Live Listings tab with headers. Returns meta."""
+    creds = await _load_sheets_creds(admin_uid)
+    if not creds:
+        raise HTTPException(status_code=400, detail="Google Sheets not connected — finish OAuth first")
+    svc = _build_sheets_service(creds)
+    spreadsheet_body = {
+        "properties": {"title": "Brokerage Pre-Lease List"},
+        "sheets": [{
+            "properties": {"title": LIVE_LISTINGS_TAB, "gridProperties": {"frozenRowCount": 1}},
+        }],
+    }
+    created = await asyncio.to_thread(lambda: svc.spreadsheets().create(body=spreadsheet_body, fields="spreadsheetId,spreadsheetUrl,sheets(properties(sheetId,title))").execute())
+    sheet_id = created["spreadsheetId"]
+    sheet_url = created["spreadsheetUrl"]
+    live_sheet_id = next((s["properties"]["sheetId"] for s in created.get("sheets", []) if s["properties"]["title"] == LIVE_LISTINGS_TAB), None)
+
+    # Write headers to Live Listings!A1:K1
+    await asyncio.to_thread(lambda: svc.spreadsheets().values().update(
+        spreadsheetId=sheet_id,
+        range=f"'{LIVE_LISTINGS_TAB}'!A1:K1",
+        valueInputOption="RAW",
+        body={"values": [LIVE_LISTINGS_HEADERS]},
+    ).execute())
+
+    # Bold / freeze header row via batchUpdate targeting ONLY our tab's sheetId
+    if live_sheet_id is not None:
+        await asyncio.to_thread(lambda: svc.spreadsheets().batchUpdate(
+            spreadsheetId=sheet_id,
+            body={"requests": [{
+                "repeatCell": {
+                    "range": {"sheetId": live_sheet_id, "startRowIndex": 0, "endRowIndex": 1},
+                    "cell": {"userEnteredFormat": {
+                        "backgroundColor": {"red": 0.059, "green": 0.463, "blue": 0.431},
+                        "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+                    }},
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                },
+            }]},
+        ).execute())
+
+    return {
+        "sheet_id": sheet_id,
+        "sheet_url": sheet_url,
+        "live_sheet_tab_id": live_sheet_id,
+    }
+
+
+async def _ensure_live_listings_tab(svc, sheet_id: str, stored_tab_id):
+    """If the admin renamed/deleted 'Live Listings', re-locate or re-create it.
+    Returns (current_tab_title, current_tab_id)."""
+    meta = await asyncio.to_thread(lambda: svc.spreadsheets().get(spreadsheetId=sheet_id, fields="sheets(properties(sheetId,title))").execute())
+    for s in meta.get("sheets", []):
+        props = s.get("properties", {})
+        if stored_tab_id is not None and props.get("sheetId") == stored_tab_id:
+            return props.get("title"), props.get("sheetId")
+    # stored tab missing — re-create
+    resp = await asyncio.to_thread(lambda: svc.spreadsheets().batchUpdate(
+        spreadsheetId=sheet_id,
+        body={"requests": [{"addSheet": {"properties": {"title": LIVE_LISTINGS_TAB, "gridProperties": {"frozenRowCount": 1}}}}]},
+    ).execute())
+    new_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
+    await asyncio.to_thread(lambda: svc.spreadsheets().values().update(
+        spreadsheetId=sheet_id,
+        range=f"'{LIVE_LISTINGS_TAB}'!A1:K1",
+        valueInputOption="RAW",
+        body={"values": [LIVE_LISTINGS_HEADERS]},
+    ).execute())
+    return LIVE_LISTINGS_TAB, new_id
+
+
+async def _sync_brokerage_sheet(admin_uid: str) -> dict:
+    """Push active listings into the Live Listings tab only. Never touches other tabs."""
+    settings_doc = await db.org_settings.find_one({"user_id": admin_uid}) or {}
+    bs = settings_doc.get("brokerage_sheet") or {}
+    if not bs.get("enabled") or not bs.get("sheet_id"):
+        return {"skipped": True, "reason": "not enabled"}
+    creds = await _load_sheets_creds(admin_uid)
+    if not creds:
+        return {"skipped": True, "reason": "tokens missing"}
+
+    svc = _build_sheets_service(creds)
+    sheet_id = bs["sheet_id"]
+    stored_tab_id = bs.get("live_sheet_tab_id")
+
+    tab_title, tab_id = await _ensure_live_listings_tab(svc, sheet_id, stored_tab_id)
+    rows = await _brokerage_active_listings(admin_uid)
+
+    # 1) Clear ONLY the data area of our tab (below the header row).
+    await asyncio.to_thread(lambda: svc.spreadsheets().values().clear(
+        spreadsheetId=sheet_id,
+        range=f"'{tab_title}'!A2:K10000",
+        body={},
+    ).execute())
+
+    # 2) Re-write the header row (idempotent, user may have edited it by mistake)
+    await asyncio.to_thread(lambda: svc.spreadsheets().values().update(
+        spreadsheetId=sheet_id,
+        range=f"'{tab_title}'!A1:K1",
+        valueInputOption="RAW",
+        body={"values": [LIVE_LISTINGS_HEADERS]},
+    ).execute())
+
+    # 3) Upsert the data rows (if any)
+    if rows:
+        await asyncio.to_thread(lambda: svc.spreadsheets().values().update(
+            spreadsheetId=sheet_id,
+            range=f"'{tab_title}'!A2",
+            valueInputOption="RAW",
+            body={"values": rows},
+        ).execute())
+
+    now = datetime.now(timezone.utc).isoformat()
+    await db.org_settings.update_one(
+        {"user_id": admin_uid},
+        {"$set": {
+            "brokerage_sheet.last_synced_at": now,
+            "brokerage_sheet.last_row_count": len(rows),
+            "brokerage_sheet.live_sheet_tab_id": tab_id,
+            "brokerage_sheet.last_sync_status": "success",
+            "brokerage_sheet.last_sync_error": "",
+        }},
+    )
+    return {"synced": True, "rows": len(rows), "at": now}
+
+
+@api_router.get("/brokerage-sheet/status")
+async def brokerage_sheet_status(user=Depends(get_any_auth_user)):
+    """Return the sheet's current status + plan gate + connection state."""
+    uid = user["_id"]
+    is_admin = (user.get("role") or "").lower() == "admin"
+    plan_ok = await _is_brokerage_pro(uid) if is_admin else False
+    keys_ok = _sheets_keys_configured()
+    tokens_doc = await db.google_tokens.find_one({"user_id": uid, "scope_set": "sheets"}) or {}
+    connected = bool(tokens_doc.get("refresh_token"))
+    doc = await db.org_settings.find_one({"user_id": uid}) or {}
+    bs = doc.get("brokerage_sheet") or {}
+    return {
+        "is_admin": is_admin,
+        "feature_available": is_admin and plan_ok,
+        "keys_configured": keys_ok,
+        "connected": connected,
+        "plan": (doc.get("plan") or "free").lower(),
+        "enabled": bool(bs.get("enabled")),
+        "sheet_id": bs.get("sheet_id", ""),
+        "sheet_url": bs.get("sheet_url", ""),
+        "share_url": bs.get("share_url", ""),
+        "permission_id": bs.get("permission_id", ""),
+        "last_synced_at": bs.get("last_synced_at", ""),
+        "last_row_count": bs.get("last_row_count", 0),
+        "last_sync_status": bs.get("last_sync_status", ""),
+        "last_sync_error": bs.get("last_sync_error", ""),
+        "redirect_uri": _redirect_uri(),
+    }
+
+
+@api_router.get("/oauth/google-sheets/login")
+async def oauth_sheets_login(user=Depends(get_any_auth_user)):
+    await _require_brokerage_admin(user)
+    if not _sheets_keys_configured():
+        raise HTTPException(status_code=400, detail="Google Sheets OAuth keys not configured")
+    if not _sheets_libs_available():
+        raise HTTPException(status_code=500, detail="Server missing google-auth-oauthlib")
+    from google_auth_oauthlib.flow import Flow
+    flow = Flow.from_client_config(_client_config(), scopes=SHEETS_SCOPES, redirect_uri=_redirect_uri())
+    state = _secrets.token_urlsafe(24)
+    await db.oauth_states.update_one(
+        {"state": state},
+        {"$set": {"state": state, "user_id": user["_id"], "purpose": "sheets",
+                  "created_at": datetime.now(timezone.utc).isoformat(),
+                  "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()}},
+        upsert=True,
+    )
+    auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent", include_granted_scopes="true", state=state)
+    return {"auth_url": auth_url}
+
+
+@api_router.get("/oauth/google-sheets/callback")
+async def oauth_sheets_callback(code: str = "", state: str = "", error: str = ""):
+    frontend = settings.FRONTEND_URL.rstrip("/")
+    if error:
+        return RedirectResponse(f"{frontend}/settings?sheets_error={error}")
+    if not code or not state:
+        return RedirectResponse(f"{frontend}/settings?sheets_error=missing_code_or_state")
+    state_doc = await db.oauth_states.find_one({"state": state, "purpose": "sheets"})
+    if not state_doc:
+        return RedirectResponse(f"{frontend}/settings?sheets_error=invalid_state")
+    await db.oauth_states.delete_one({"state": state})
+    user_id = state_doc["user_id"]
+    if not _sheets_libs_available() or not _sheets_keys_configured():
+        return RedirectResponse(f"{frontend}/settings?sheets_error=keys_missing")
+    try:
+        from google_auth_oauthlib.flow import Flow
+        flow = Flow.from_client_config(_client_config(), scopes=SHEETS_SCOPES, redirect_uri=_redirect_uri())
+        await asyncio.to_thread(flow.fetch_token, code=code)
+        creds = flow.credentials
+        await db.google_tokens.update_one(
+            {"user_id": user_id, "scope_set": "sheets"},
+            {"$set": {
+                "user_id": user_id, "scope_set": "sheets",
+                "access_token": creds.token,
+                "refresh_token": creds.refresh_token or (state_doc.get("existing_refresh") or ""),
+                "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=55)).isoformat(),
+                "scopes": list(creds.scopes or SHEETS_SCOPES),
+            }},
+            upsert=True,
+        )
+    except Exception as e:
+        logger.exception(f"Sheets OAuth callback failed: {e}")
+        return RedirectResponse(f"{frontend}/settings?sheets_error=token_exchange_failed")
+    return RedirectResponse(f"{frontend}/settings?tab=integrations&sheets_connected=1")
+
+
+@api_router.post("/brokerage-sheet/enable")
+async def brokerage_sheet_enable(user=Depends(get_any_auth_user)):
+    await _require_brokerage_admin(user)
+    uid = user["_id"]
+    doc = await db.org_settings.find_one({"user_id": uid}) or {}
+    bs = doc.get("brokerage_sheet") or {}
+    if bs.get("enabled") and bs.get("sheet_id"):
+        return bs
+    meta = await _create_brokerage_sheet(uid)
+    new_bs = {
+        "enabled": True,
+        "sheet_id": meta["sheet_id"],
+        "sheet_url": meta["sheet_url"],
+        "live_sheet_tab_id": meta["live_sheet_tab_id"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.org_settings.update_one(
+        {"user_id": uid},
+        {"$set": {"brokerage_sheet": new_bs},
+         "$setOnInsert": {"user_id": uid, "created_at": datetime.now(timezone.utc).isoformat()}},
+        upsert=True,
+    )
+    # Kick off an immediate sync
+    try:
+        await _sync_brokerage_sheet(uid)
+    except Exception as e:
+        logger.warning(f"First sync failed: {e}")
+    return new_bs
+
+
+@api_router.post("/brokerage-sheet/sync")
+async def brokerage_sheet_sync_now(user=Depends(get_any_auth_user)):
+    await _require_brokerage_admin(user)
+    res = await _sync_brokerage_sheet(user["_id"])
+    return res
+
+
+@api_router.post("/brokerage-sheet/share")
+async def brokerage_sheet_share(user=Depends(get_any_auth_user)):
+    """Create a 'anyone with the link can VIEW' permission, return the share URL."""
+    await _require_brokerage_admin(user)
+    uid = user["_id"]
+    creds = await _load_sheets_creds(uid)
+    if not creds:
+        raise HTTPException(status_code=400, detail="Connect Google Sheets first")
+    doc = await db.org_settings.find_one({"user_id": uid}) or {}
+    bs = doc.get("brokerage_sheet") or {}
+    if not bs.get("sheet_id"):
+        raise HTTPException(status_code=400, detail="Sheet not yet created")
+    drive = _build_drive_service(creds)
+    perm = await asyncio.to_thread(lambda: drive.permissions().create(
+        fileId=bs["sheet_id"],
+        body={"role": "reader", "type": "anyone"},
+        fields="id",
+    ).execute())
+    share_url = f"https://docs.google.com/spreadsheets/d/{bs['sheet_id']}/edit?usp=sharing"
+    await db.org_settings.update_one(
+        {"user_id": uid},
+        {"$set": {"brokerage_sheet.share_url": share_url, "brokerage_sheet.permission_id": perm["id"]}},
+    )
+    return {"share_url": share_url, "permission_id": perm["id"]}
+
+
+@api_router.post("/brokerage-sheet/revoke-share")
+async def brokerage_sheet_revoke_share(user=Depends(get_any_auth_user)):
+    await _require_brokerage_admin(user)
+    uid = user["_id"]
+    creds = await _load_sheets_creds(uid)
+    doc = await db.org_settings.find_one({"user_id": uid}) or {}
+    bs = doc.get("brokerage_sheet") or {}
+    if creds and bs.get("sheet_id") and bs.get("permission_id"):
+        try:
+            drive = _build_drive_service(creds)
+            await asyncio.to_thread(lambda: drive.permissions().delete(fileId=bs["sheet_id"], permissionId=bs["permission_id"]).execute())
+        except Exception as e:
+            logger.warning(f"Revoke share failed: {e}")
+    await db.org_settings.update_one(
+        {"user_id": uid},
+        {"$set": {"brokerage_sheet.share_url": "", "brokerage_sheet.permission_id": ""}},
+    )
+    return {"success": True}
+
+
+@api_router.post("/brokerage-sheet/disconnect")
+async def brokerage_sheet_disconnect(user=Depends(get_any_auth_user)):
+    """Disable sync & delete stored tokens. The sheet itself remains in the admin's Drive."""
+    await _require_brokerage_admin(user)
+    uid = user["_id"]
+    await db.google_tokens.delete_many({"user_id": uid, "scope_set": "sheets"})
+    await db.org_settings.update_one(
+        {"user_id": uid},
+        {"$set": {"brokerage_sheet.enabled": False,
+                  "brokerage_sheet.last_sync_status": "disconnected"}},
+    )
+    return {"success": True}
+
+
+# ── 60-second sync worker ────────────────────────────────────────────────────
+async def brokerage_sheet_sync_worker():
+    """Every 60s, sync each admin's Live Listings tab. Fails softly per-user."""
+    logger.info("Brokerage-sheet sync worker started")
+    while True:
+        try:
+            await asyncio.sleep(60)
+            if not _sheets_keys_configured() or not _sheets_libs_available():
+                continue
+            async for doc in db.org_settings.find({"brokerage_sheet.enabled": True}, {"user_id": 1, "brokerage_sheet.sheet_id": 1}):
+                uid = doc.get("user_id")
+                if not uid:
+                    continue
+                try:
+                    await _sync_brokerage_sheet(uid)
+                except Exception as e:
+                    logger.warning(f"Sheet sync failed user={uid}: {e}")
+                    await db.org_settings.update_one(
+                        {"user_id": uid},
+                        {"$set": {
+                            "brokerage_sheet.last_sync_status": "error",
+                            "brokerage_sheet.last_sync_error": str(e)[:300],
+                        }},
+                    )
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.exception(f"Sheet worker loop error: {e}")
 
 
 app.include_router(api_router)

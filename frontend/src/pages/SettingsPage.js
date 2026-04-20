@@ -8,6 +8,9 @@ import {
   useWebhooks, useDeleteWebhook, useToggleWebhook,
   useOrgSettings, useUpdateOrgSettings, useSettingsSummary, useSequences,
   useTemplates, useProperties,
+  useBrokerageSheetStatus, useEnableBrokerageSheet, useSyncBrokerageSheet,
+  useShareBrokerageSheet, useRevokeBrokerageSheetShare, useDisconnectBrokerageSheet,
+  useStartSheetsOAuth,
 } from '../hooks/useApi';
 import { useQueryClient } from '@tanstack/react-query';
 import {
@@ -15,7 +18,8 @@ import {
   Globe, ToggleLeft, ToggleRight, LayoutGrid, Shuffle, Building2, Zap,
   FileText, Plug, Tags, TrendingUp, ChevronRight, Sparkles, Home,
   Wrench, Mail, MessageSquare, Briefcase, ExternalLink, Calendar,
-  CircleCheck, CircleAlert, Save,
+  CircleCheck, CircleAlert, Save, Sheet as SheetIcon, RefreshCw, Link as LinkIcon,
+  Lock, GraduationCap,
 } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -616,6 +620,8 @@ function IntegrationsTab() {
 
   return (
     <div className="space-y-4" data-testid="integrations-tab">
+      <BrokerageSheetCard />
+
       {/* Third-party status */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <ThirdPartyCard icon={Mail} name="Brevo Email" desc="Transactional email via Brevo (300/day free)" env="BREVO_API_KEY" link="https://app.brevo.com/settings/keys/api" accent="bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300" />
@@ -980,5 +986,217 @@ function RenewalsTab() {
         </ul>
       </Card>
     </div>
+  );
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE 19 — BROKERAGE PRE-LEASE GOOGLE SHEET
+// ═══════════════════════════════════════════════════════════════════════════
+function BrokerageSheetCard() {
+  const { data: status, isLoading } = useBrokerageSheetStatus();
+  const enable = useEnableBrokerageSheet();
+  const sync = useSyncBrokerageSheet();
+  const share = useShareBrokerageSheet();
+  const revokeShare = useRevokeBrokerageSheetShare();
+  const disconnect = useDisconnectBrokerageSheet();
+  const startOAuth = useStartSheetsOAuth();
+  const [busy, setBusy] = React.useState('');
+
+  if (isLoading) {
+    return (
+      <Card>
+        <div className="h-24 bg-slate-100 dark:bg-slate-700/60 rounded-lg animate-pulse" />
+      </Card>
+    );
+  }
+  if (!status) return null;
+
+  const gate = (() => {
+    if (!status.is_admin)         return { kind: 'admin_only', title: 'Brokerage admin only', desc: 'Ask a brokerage admin in your team to enable this feature.' };
+    if (!status.feature_available) return { kind: 'plan',      title: 'Upgrade to Brokerage Pro', desc: 'The pre-lease Google Sheet is available on the Brokerage Pro and Enterprise plans.' };
+    if (!status.keys_configured)   return { kind: 'keys',      title: 'Google OAuth not configured', desc: 'Your tech admin needs to set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the backend .env file, then restart the server.' };
+    if (!status.connected)         return { kind: 'connect',   title: 'Connect Google Sheets',    desc: 'Authorize PropFlow to create and maintain your Brokerage Pre-Lease List in your own Google Drive.' };
+    return null;
+  })();
+
+  const connectGoogle = async () => {
+    try {
+      const res = await startOAuth.mutateAsync();
+      if (res?.auth_url) window.location.href = res.auth_url;
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || 'Could not start Google OAuth');
+    }
+  };
+
+  const handleEnable = async () => {
+    setBusy('enable');
+    try { await enable.mutateAsync(); toast.success('Brokerage Pre-Lease Sheet created in your Google Drive'); }
+    catch (e) { toast.error(e?.response?.data?.detail || 'Could not create sheet'); }
+    setBusy('');
+  };
+
+  const handleSync = async () => {
+    setBusy('sync');
+    try { const res = await sync.mutateAsync(); toast.success(`Synced ${res.data?.rows ?? 0} listings`); }
+    catch (e) { toast.error('Sync failed'); }
+    setBusy('');
+  };
+
+  const handleShare = async () => {
+    setBusy('share');
+    try { await share.mutateAsync(); toast.success('View-only link created'); }
+    catch (e) { toast.error(e?.response?.data?.detail || 'Could not create share link'); }
+    setBusy('');
+  };
+
+  const handleRevoke = async () => {
+    if (!window.confirm('Revoke the public view-only link?')) return;
+    try { await revokeShare.mutateAsync(); toast.success('Share link revoked'); }
+    catch { toast.error('Could not revoke'); }
+  };
+
+  const handleDisconnect = async () => {
+    if (!window.confirm('Disconnect PropFlow from Google Sheets? The spreadsheet remains in your Drive.')) return;
+    try { await disconnect.mutateAsync(); toast.success('Disconnected'); }
+    catch { toast.error('Could not disconnect'); }
+  };
+
+  const copyLink = (url) => {
+    navigator.clipboard.writeText(url);
+    toast.success('Link copied');
+  };
+
+  return (
+    <Card className="bg-gradient-to-br from-emerald-50/70 via-white to-brand/5 dark:from-emerald-900/15 dark:via-slate-800 dark:to-brand/10 border-emerald-200/70 dark:border-emerald-800/40">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-3">
+          <div className="w-11 h-11 rounded-lg bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300 flex items-center justify-center shrink-0">
+            <SheetIcon className="w-5 h-5" strokeWidth={2.2} />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="text-[14px] font-bold text-slate-900 dark:text-slate-100">Brokerage Pre-Lease Sheet</h3>
+              <Badge className="text-[10px] border-0 bg-brand/10 text-brand dark:bg-brand/20 dark:text-brand-ring">Brokerage Pro</Badge>
+              <Badge className="text-[10px] border-0 bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300">
+                <GraduationCap className="w-3 h-3 mr-0.5" /> Student rental
+              </Badge>
+            </div>
+            <p className="text-[12px] text-slate-600 dark:text-slate-400 mt-0.5 max-w-xl">
+              Auto-sync every active listing from every agent into a single shareable Google Sheet. PropFlow maintains the "Live Listings" tab; you own and edit everything else.
+            </p>
+          </div>
+        </div>
+        {status.connected && status.enabled && (
+          <Badge className="text-[10px] border-0 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300 shrink-0">
+            <CircleCheck className="w-3 h-3 mr-0.5" /> Active
+          </Badge>
+        )}
+      </div>
+
+      {/* GATE STATES */}
+      {gate && (
+        <div className="mt-4 bg-white/70 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-700/60 rounded-lg p-4 flex items-start gap-3" data-testid={`brokerage-sheet-gate-${gate.kind}`}>
+          <div className="w-8 h-8 rounded-md bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 flex items-center justify-center shrink-0">
+            {gate.kind === 'admin_only' ? <Lock className="w-4 h-4" /> :
+             gate.kind === 'plan'       ? <Sparkles className="w-4 h-4" /> :
+             gate.kind === 'keys'       ? <Key className="w-4 h-4" /> :
+                                          <LinkIcon className="w-4 h-4" />}
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-[13px] font-bold text-slate-900 dark:text-slate-100">{gate.title}</p>
+            <p className="text-[12px] text-slate-600 dark:text-slate-400 mt-0.5">{gate.desc}</p>
+            {gate.kind === 'keys' && (
+              <div className="mt-2.5 bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700/60 rounded-md p-2.5 space-y-1">
+                <p className="text-[11px] text-slate-600 dark:text-slate-400">Redirect URI to register in Google Cloud Console:</p>
+                <code className="block text-[11px] font-mono text-slate-800 dark:text-slate-200 break-all bg-white dark:bg-slate-800 px-2 py-1 rounded border border-slate-200 dark:border-slate-700">
+                  {status.redirect_uri}
+                </code>
+                <p className="text-[11px] text-slate-500 dark:text-slate-500 mt-1">
+                  Scopes: <code className="text-[10px]">spreadsheets</code>, <code className="text-[10px]">drive.file</code>, <code className="text-[10px]">userinfo.email</code>
+                </p>
+              </div>
+            )}
+            {gate.kind === 'connect' && (
+              <Button size="sm" onClick={connectGoogle} className="mt-3 h-9 text-[13px] bg-brand hover:bg-brand-dark text-white" data-testid="connect-google-sheets">
+                <LinkIcon className="w-3.5 h-3.5 mr-1.5" /> Connect Google Sheets
+              </Button>
+            )}
+            {gate.kind === 'plan' && (
+              <Button size="sm" variant="outline" className="mt-3 h-9 text-[13px]" disabled data-testid="upgrade-pro">Contact sales to upgrade</Button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* READY STATE */}
+      {!gate && !status.enabled && (
+        <div className="mt-4 flex items-center gap-2 flex-wrap">
+          <Button size="sm" onClick={handleEnable} disabled={busy === 'enable'} className="h-9 text-[13px] bg-brand hover:bg-brand-dark text-white" data-testid="create-brokerage-sheet">
+            <Sparkles className="w-3.5 h-3.5 mr-1.5" /> {busy === 'enable' ? 'Creating sheet…' : 'Create the sheet in my Drive'}
+          </Button>
+          <Button size="sm" variant="ghost" onClick={handleDisconnect} className="h-9 text-[12px] text-rose-500" data-testid="disconnect-sheets">
+            Disconnect Google
+          </Button>
+        </div>
+      )}
+
+      {/* ENABLED — main dashboard */}
+      {!gate && status.enabled && status.sheet_url && (
+        <div className="mt-4 space-y-3" data-testid="brokerage-sheet-active">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            <Stat label="Listings synced"  value={status.last_row_count ?? 0} />
+            <Stat label="Last synced"       value={status.last_synced_at ? new Date(status.last_synced_at).toLocaleTimeString() : '—'} />
+            <Stat label="Status"            value={status.last_sync_status === 'error' ? 'Error' : 'Live'} />
+            <Stat label="Share link"        value={status.share_url ? 'Active' : 'Off'} />
+          </div>
+
+          {status.last_sync_status === 'error' && (
+            <div className="bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800/60 rounded-md p-3">
+              <p className="text-[12px] text-rose-800 dark:text-rose-300 font-semibold">Last sync failed</p>
+              <p className="text-[11px] text-rose-700 dark:text-rose-400 mt-0.5 font-mono break-all">{status.last_sync_error}</p>
+            </div>
+          )}
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <a href={status.sheet_url} target="_blank" rel="noreferrer">
+              <Button size="sm" variant="outline" className="h-9 text-[13px]" data-testid="open-sheet">
+                <ExternalLink className="w-3.5 h-3.5 mr-1.5" /> Open in Google Sheets
+              </Button>
+            </a>
+            <Button size="sm" variant="outline" className="h-9 text-[13px]" onClick={handleSync} disabled={busy === 'sync'} data-testid="sync-now">
+              <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${busy === 'sync' ? 'animate-spin' : ''}`} /> Sync now
+            </Button>
+            {!status.share_url ? (
+              <Button size="sm" onClick={handleShare} disabled={busy === 'share'} className="h-9 text-[13px] bg-brand hover:bg-brand-dark text-white" data-testid="share-sheet">
+                <LinkIcon className="w-3.5 h-3.5 mr-1.5" /> Create view-only link
+              </Button>
+            ) : (
+              <>
+                <Button size="sm" variant="outline" className="h-9 text-[13px]" onClick={() => copyLink(status.share_url)} data-testid="copy-share-link">
+                  <Copy className="w-3.5 h-3.5 mr-1.5" /> Copy view link
+                </Button>
+                <Button size="sm" variant="ghost" className="h-9 text-[13px] text-rose-500" onClick={handleRevoke} data-testid="revoke-share">
+                  <Trash2 className="w-3.5 h-3.5 mr-1.5" /> Revoke access
+                </Button>
+              </>
+            )}
+            <Button size="sm" variant="ghost" onClick={handleDisconnect} className="h-9 text-[12px] text-slate-500 ml-auto" data-testid="disconnect-sheets-active">
+              Disconnect
+            </Button>
+          </div>
+
+          <div className="bg-slate-50/70 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-700/60 rounded-lg p-3 text-[12px] text-slate-600 dark:text-slate-400">
+            <p className="font-semibold text-slate-700 dark:text-slate-300 mb-1 flex items-center gap-1.5"><Shield className="w-3.5 h-3.5" /> What PropFlow writes to</p>
+            <ul className="list-disc ml-5 space-y-0.5">
+              <li>Only the <code className="bg-white dark:bg-slate-800 px-1 rounded font-mono text-[11px]">Live Listings</code> tab — never any tab you add (Instructions, Pricing Notes, etc.).</li>
+              <li>Refreshed every 60 seconds with every active listing across your team.</li>
+              <li>Columns: Property · Unit # · Address · Rent · Availability · Status · Proximity to Campus · Bus Routes · Pet Policy · Last Updated · Listing Agent.</li>
+              <li>You own the spreadsheet in full — add tabs, formulas, formatting; PropFlow won't touch them.</li>
+            </ul>
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }

@@ -14,6 +14,7 @@ Full-stack residential-leasing CRM that matches or exceeds FollowUpBoss. Stack: 
 16. Dark-mode contrast fix for Calendar.
 17. Admin / Settings (FUB-parity): 9-tab layout, org_settings (company, lead-flow, renewals, custom fields, tags, maintenance types).
 18. **Reporting / Analytics** (FUB-parity) — 10 tabs including **Anonymous Network Benchmarks** (Austin metro, university-zone aware). Date range picker, CSV export, help dialog.
+19. **Brokerage Pre-Lease Google Sheet** (Brokerage Pro only) — admin-only OAuth2 flow, auto-created "Live Listings" tab with 11 student-rental columns, 60-second sync worker aggregating all agents' active listings, view-only share link + revoke, disconnect flow. Graceful-no-keys mode — card renders & shows setup instructions until `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` are set. PropFlow writes **only** to the Live Listings tab; any tabs the admin adds (Instructions, Pricing Notes, formulas) remain untouched.
 
 ## Current architecture
 - `/app/backend/server.py`: all endpoints (to be split later).

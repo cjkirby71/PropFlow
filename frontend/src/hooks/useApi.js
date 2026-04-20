@@ -360,6 +360,62 @@ export function useBenchmarks({ dateRange = '30d', universityZone = 'all' } = {}
   });
 }
 
+// ── Phase 19: Brokerage pre-lease Google Sheet ──
+export function useBrokerageSheetStatus() {
+  return useQuery({
+    queryKey: ['brokerage-sheet-status'],
+    queryFn: async () => (await api.get('/brokerage-sheet/status')).data,
+    staleTime: 10 * 1000,
+    refetchInterval: 30 * 1000,
+  });
+}
+
+export function useEnableBrokerageSheet() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post('/brokerage-sheet/enable'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['brokerage-sheet-status'] }),
+  });
+}
+
+export function useSyncBrokerageSheet() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post('/brokerage-sheet/sync'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['brokerage-sheet-status'] }),
+  });
+}
+
+export function useShareBrokerageSheet() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post('/brokerage-sheet/share'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['brokerage-sheet-status'] }),
+  });
+}
+
+export function useRevokeBrokerageSheetShare() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post('/brokerage-sheet/revoke-share'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['brokerage-sheet-status'] }),
+  });
+}
+
+export function useDisconnectBrokerageSheet() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post('/brokerage-sheet/disconnect'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['brokerage-sheet-status'] }),
+  });
+}
+
+export function useStartSheetsOAuth() {
+  return useMutation({
+    mutationFn: async () => (await api.get('/oauth/google-sheets/login')).data,
+  });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ACTIVITIES
 // ─────────────────────────────────────────────────────────────────────────────
