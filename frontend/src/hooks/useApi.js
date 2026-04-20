@@ -341,6 +341,25 @@ export function useSettingsSummary() {
   });
 }
 
+// ── Phase 18: Reporting / Analytics ──
+export function useLeasingReport({ dateRange = '30d', scope = 'me' } = {}) {
+  return useQuery({
+    queryKey: ['leasing-report', { dateRange, scope }],
+    queryFn: async () => (await api.get('/reports/leasing', { params: { date_range: dateRange, scope } })).data,
+    staleTime: 30 * 1000,
+    keepPreviousData: true,
+  });
+}
+
+export function useBenchmarks({ dateRange = '30d', universityZone = 'all' } = {}) {
+  return useQuery({
+    queryKey: ['benchmarks', { dateRange, universityZone }],
+    queryFn: async () => (await api.get('/reports/benchmarks', { params: { date_range: dateRange, university_zone: universityZone } })).data,
+    staleTime: 60 * 1000,
+    keepPreviousData: true,
+  });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ACTIVITIES
 // ─────────────────────────────────────────────────────────────────────────────

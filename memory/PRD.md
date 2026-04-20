@@ -1,73 +1,42 @@
-# PropFlow CRM - Product Requirements Document
+# PropFlow CRM — PRD
 
-## Original Problem Statement
-Build a CRM (similar to FollowUpBoss) for Residential Leasing and Commercial Sales/Leasing. Needs separate pipelines and workflows for each specialty. Should integrate with MaxClaw AI agent.
+## Product goal
+Full-stack residential-leasing CRM that matches or exceeds FollowUpBoss. Stack: React 19 + FastAPI + MongoDB. Stylistic direction: teal/amber/emerald palette, dark mode, premium shadows.
 
-## Architecture
-- **Backend**: FastAPI + MongoDB (Motor async driver)
-- **Frontend**: React 19 + Tailwind CSS + Shadcn/UI
-- **AI**: OpenAI GPT-5.2 via Emergent LLM Key (emergentintegrations)
-- **Auth**: JWT (httpOnly cookies) + API Key auth for external agents
-- **Database**: MongoDB (test_database)
+## Phases completed
+1–8. Foundation: Contacts / Deals / Properties / Tasks / Templates / Sequences / AI / Webhooks / Activities / Global search / RBAC / Testing.
+10. Pipeline: multi-pipeline, custom stages, drag-and-drop.
+11. Dashboard (FUB-parity): Top KPIs, sparklines, Recent Activity.
+12. Global UI/UX polish: Teal/Amber/Emerald palette, dark mode, Shadcn overrides.
+13. Contacts (FUB-parity): Smart lists, bulk actions, leasing columns.
+14. Unified Inbox: Email + SMS + voicemail, threads, draft auto-save, Brevo/Twilio.
+15. Tasks (FUB-parity): Today/Overdue/Future tabs, leasing task types, bulk ops, complete+log.
+16. Dark-mode contrast fix for Calendar.
+17. Admin / Settings (FUB-parity): 9-tab layout, org_settings (company, lead-flow, renewals, custom fields, tags, maintenance types).
+18. **Reporting / Analytics** (FUB-parity) — 10 tabs including **Anonymous Network Benchmarks** (Austin metro, university-zone aware). Date range picker, CSV export, help dialog.
 
-## User Personas
-1. **Real Estate Agent** - Primary user managing leads, deals, properties across residential and commercial
-2. **Team Admin** - Manages team settings, API keys
-3. **MaxClaw Agent** - External AI agent populating CRM via API
+## Current architecture
+- `/app/backend/server.py`: all endpoints (to be split later).
+- `/app/frontend/src/pages/`: page components (Analytics, Tasks, Settings, Inbox, Contacts, ContactDetail, Dashboard, Pipeline, Calendar, Templates, Sequences, Properties).
+- `/app/frontend/src/hooks/useApi.js`: TanStack-Query hooks.
 
-## Core Requirements
-1. Contact/Lead Management with tags, source tracking, property type
-2. Deal Pipeline with drag-and-drop (3 separate pipelines)
-3. Task & Follow-up Reminders with due dates, priorities
-4. Property Listings linked to deals
-5. Activity/Communication Log (calls, emails, notes, meetings)
-6. AI-powered email drafts, lead scoring, activity summaries
-7. API key management for external agent integration
-8. Dashboard with analytics and charts
+## Backlog (P1)
+- Activate Brevo / Twilio / Google Calendar with user-supplied keys.
+- IDX / Lead Source webhooks (`/api/webhooks/idx`).
+- Commission tracker (splits, payouts, ledger).
+- Document management (contract upload + e-sign).
+- Showing scheduler (tour bookings + availability slots).
+- Benchmarks opt-in & actual cross-org aggregation (currently peer snapshot).
 
-## What's Been Implemented (2026-04-14)
-- Full JWT auth (login, register, logout, refresh, admin seeding)
-- Contact CRUD with search, filtering, tags
-- **CSV import/export** for bulk contact management
-- Deal pipeline with 3 types: Residential Lease, Commercial Sale, Commercial Lease
-- Drag-and-drop kanban board (@hello-pangea/dnd)
-- **Deal stage automation** - auto-creates tasks when deals move stages
-- Property listings CRUD
-- Task management with priorities and due dates
-- **Calendar view** for tasks with monthly grid and date selection
-- Activity logging on contacts
-- AI email drafting (GPT-5.2)
-- AI lead scoring (GPT-5.2)
-- **SendGrid email integration** (send directly from CRM, sender: craig@respaceteam.com)
-- **Twilio SMS integration** (text leads from contact detail pages)
-- API key management for MaxClaw agent
-- **Webhook notifications** (real-time alerts on new leads, deal changes, emails/SMS)
-- **Team management** with role-based access (admin/agent), invites
-- Dashboard with stats, charts (Recharts)
-- Settings page with 4 tabs: API Keys, Team, Webhooks, Integrations
-- **Email/SMS Templates** with CRUD, AI generation, placeholder support, usage tracking
-- Template picker in Send Email and Send SMS dialogs on contact detail pages
+## Backlog (P2)
+- Transaction checklist (closing workflow per deal).
+- Client portal (buyers/sellers shared view).
+- AI enhancements (conversational assistant, predictive lead scoring, auto-reply, transcript summary).
 
-## Pipeline Stages
-- **Residential Lease**: New Lead → Contacted → Showing → Application → Lease Signed → Closed
-- **Commercial Sale**: New Lead → Contacted → Tour → LOI → Due Diligence → Closing → Closed
-- **Commercial Lease**: New Lead → Contacted → Tour → Proposal → Negotiation → Lease Signed → Closed
+## Backlog (P3)
+- PWA / offline / push notifications.
+- Refactor: split `server.py` into `/app/backend/routes/*`, `/app/backend/models/*`, add `/app/backend/tests/*`.
+- Split `ContactsPage.js` into sub-components (SmartListSidebar, BulkActionsBar, ContactsTable).
 
-## Prioritized Backlog
-### P0 (Implemented)
-- Auth, Contacts, Deals, Pipeline, Properties, Tasks, Activities, AI, API Keys, Dashboard
-- CSV Import/Export, Email (SendGrid), SMS (Twilio), Calendar, Deal Automation, Team, Webhooks
-
-### P1 (Next - Requires User API Keys)
-- Configure SendGrid API key for live email sending
-- Configure Twilio credentials for live SMS
-- Contact merge/dedup tool
-- Email templates (saved drafts)
-- Bulk deal creation
-
-### P2 (Future)
-- Advanced reporting/analytics export
-- Multi-team organization support
-- Document storage per deal/contact
-- Mobile-responsive improvements
-- Webhook retry logic and delivery monitoring
+## Test credentials
+See `/app/memory/test_credentials.md`.
