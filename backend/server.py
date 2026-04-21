@@ -486,6 +486,7 @@ class ContactUpdate(BaseModel):
     address: Optional[str] = Field(default=None, max_length=500)
     collaborator_ids: Optional[List[str]] = None
     is_tenant: Optional[bool] = None
+    last_reengaged_at: Optional[str] = Field(default=None, max_length=40)
 
 class PropertyCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=300)
@@ -563,6 +564,7 @@ class DealUpdate(BaseModel):
     move_in_date: Optional[str] = Field(default=None, max_length=20)
     tags: Optional[List[str]] = None
     co_applicant_ids: Optional[List[str]] = None
+    last_reengaged_at: Optional[str] = Field(default=None, max_length=40)
 
 class TaskCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=300)

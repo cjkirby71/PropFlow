@@ -83,6 +83,7 @@ const AVAILABLE_COLUMNS = [
   { id: 'unit_interest', label: 'Unit Interest',      default: true },
   { id: 'renewal',       label: 'Renewal Status',     default: true },
   { id: 'last_activity', label: 'Last Activity',      default: true },
+  { id: 'last_reengaged',label: 'Last Re-engaged',    default: false },
   { id: 'type',          label: 'Type',               default: false },
   { id: 'score',         label: 'Score',              default: true },
 ];
@@ -144,11 +145,45 @@ export default function ContactsPage() {
   const [importResult, setImportResult] = useState(null);
   const fileInputRef = useRef(null);
   const [sidebarExpanded, setSidebarExpanded] = useState({ smart: true, collections: true });
+  const [moveInAnniversaryFilter, setMoveInAnniversaryFilter] = useState(false);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  const { data: contacts = [], isLoading: loading, error, refetch, isFetching } = useContacts(search, filterType, smartList, collection);
+  const { data: rawContacts = [], isLoading: loading, error, refetch, isFetching } = useContacts(search, filterType, smartList, collection);
   const { data: counts = {}, refetch: refetchCounts } = useContactSmartCounts();
+
+  // Auto-show the Last Re-engaged column + allow the anniversary filter when viewing the re-engage list
+  const isReengageList = smartList === 'recontact_next_year';
+  useEffect(() => {
+    setVisibleCols(prev => {
+      if (isReengageList && !prev.has('last_reengaged')) {
+        const next = new Set(prev); next.add('last_reengaged'); return next;
+      }
+      return prev;
+    });
+    if (!isReengageList && moveInAnniversaryFilter) setMoveInAnniversaryFilter(false);
+  }, [isReengageList]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // "Move-in anniversary within 60 days" — compare month/day of move_in_date
+  // to today's month/day, looking forward 60 calendar days.
+  const contacts = useMemo(() => {
+    if (!moveInAnniversaryFilter) return rawContacts;
+    const now = new Date();
+    const msPerDay = 86400 * 1000;
+    return rawContacts.filter(c => {
+      if (!c.move_in_date) return false;
+      const d = new Date(c.move_in_date);
+      if (Number.isNaN(d.getTime())) return false;
+      // Build this-year anniversary date (MM-DD of the stored move-in)
+      let anniv = new Date(now.getFullYear(), d.getMonth(), d.getDate());
+      // If the anniversary already passed this year, roll to next year
+      if (anniv < new Date(now.getFullYear(), now.getMonth(), now.getDate())) {
+        anniv = new Date(now.getFullYear() + 1, d.getMonth(), d.getDate());
+      }
+      const days = Math.floor((anniv - now) / msPerDay);
+      return days >= 0 && days <= 60;
+    });
+  }, [rawContacts, moveInAnniversaryFilter]);
   const deleteMutation = useDeleteContact();
   const importMutation = useImportContacts();
 
@@ -215,6 +250,25 @@ export default function ContactsPage() {
       toast.success(existing.includes(TAG) ? 'Removed from Re-engage Next Year' : 'Moved to Re-engage Next Year — scrub by move-in date next season');
     } catch (err) {
       toast.error('Could not update contact');
+    }
+  };
+
+  const handleReengageNow = async (contact) => {
+    const nowIso = new Date().toISOString();
+    try {
+      await api.put(`/contacts/${contact.id}`, { last_reengaged_at: nowIso });
+      // Also log an activity so the timeline reflects the outreach
+      try {
+        await api.post('/activities', {
+          contact_id: contact.id,
+          activity_type: 'note',
+          description: 'Re-engagement outreach started (moved from Re-engage Next Year).',
+        });
+      } catch { /* activity endpoint is best-effort */ }
+      invalidateContacts();
+      toast.success(`Re-engaged ${contact.name || 'contact'} — timestamp recorded`);
+    } catch (err) {
+      toast.error('Could not mark as re-engaged');
     }
   };
 
@@ -566,7 +620,7 @@ export default function ContactsPage() {
           </div>
 
           {/* Search */}
-          <div className="flex gap-3 flex-wrap" data-testid="contacts-filters">
+          <div className="flex gap-3 flex-wrap items-center" data-testid="contacts-filters">
             <div className="relative flex-1 min-w-[220px] max-w-md">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 dark:text-slate-500" />
               <Input
@@ -577,6 +631,25 @@ export default function ContactsPage() {
                 data-testid="contacts-search-input"
               />
             </div>
+
+            {/* Re-engage list anniversary filter chip */}
+            {isReengageList && (
+              <button
+                type="button"
+                onClick={() => setMoveInAnniversaryFilter(v => !v)}
+                className={`inline-flex items-center gap-1.5 px-3 h-10 rounded-full text-xs font-semibold border transition ${
+                  moveInAnniversaryFilter
+                    ? 'bg-brand text-white border-brand shadow-sm'
+                    : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-brand/40'
+                }`}
+                data-testid="anniversary-filter-chip"
+                title="Only show contacts whose move-in anniversary is within the next 60 days"
+              >
+                <CalendarClock className="w-3.5 h-3.5" />
+                Move-in within 60 days
+                {moveInAnniversaryFilter && <XIcon className="w-3 h-3 ml-0.5" />}
+              </button>
+            )}
           </div>
 
           {/* ── Bulk action toolbar ── */}
@@ -656,6 +729,7 @@ export default function ContactsPage() {
                       {visibleCols.has('unit_interest') && <th className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider py-3 px-3">Unit Interest</th>}
                       {visibleCols.has('renewal')       && <th className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider py-3 px-3">Renewal</th>}
                       {visibleCols.has('last_activity') && <th className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider py-3 px-3">Last Activity</th>}
+                      {visibleCols.has('last_reengaged')&& <th className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider py-3 px-3">Last Re-engaged</th>}
                       {visibleCols.has('type')          && <th className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider py-3 px-3">Type</th>}
                       {visibleCols.has('score')         && <th className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider py-3 px-3">Score</th>}
                       <th className="py-3 px-3 w-10"></th>
@@ -756,6 +830,16 @@ export default function ContactsPage() {
                               ) : <span className="text-xs text-slate-300 dark:text-slate-600">No activity</span>}
                             </td>
                           )}
+                          {visibleCols.has('last_reengaged') && (
+                            <td className="py-3 px-3 align-middle">
+                              {c.last_reengaged_at ? (
+                                <span className="inline-flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-400">
+                                  <RefreshCcw className="w-3.5 h-3.5 text-brand" />
+                                  {humanizeRel(c.last_reengaged_at)}
+                                </span>
+                              ) : <span className="text-xs text-slate-300 dark:text-slate-600">—</span>}
+                            </td>
+                          )}
                           {visibleCols.has('type') && (
                             <td className="py-3 px-3 align-middle">
                               <Badge variant="outline" className="text-[10px]">
@@ -791,6 +875,11 @@ export default function ContactsPage() {
                                 <DropdownMenuItem onClick={() => handleMarkRecontactNextYear(c)} data-testid={`recontact-contact-${c.id}`}>
                                   <UserX className="w-4 h-4 mr-2 text-slate-500" /> {(c.tags || []).includes('recontact-next-year') ? 'Remove "Re-engage Next Year"' : 'Move to Re-engage Next Year'}
                                 </DropdownMenuItem>
+                                {(c.tags || []).includes('recontact-next-year') && (
+                                  <DropdownMenuItem onClick={() => handleReengageNow(c)} data-testid={`reengage-now-${c.id}`}>
+                                    <RefreshCcw className="w-4 h-4 mr-2 text-brand" /> Re-engage now
+                                  </DropdownMenuItem>
+                                )}
                                 <DropdownMenuItem onClick={() => handleDelete(c.id)} className="text-rose-600 dark:text-rose-400" data-testid={`delete-contact-${c.id}`}>
                                   <Trash2 className="w-4 h-4 mr-2" /> Delete
                                 </DropdownMenuItem>
