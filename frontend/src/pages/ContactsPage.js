@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import api from '../lib/api';
@@ -140,6 +140,7 @@ export default function ContactsPage() {
   const [showAdd, setShowAdd] = useState(false);
   const [editContact, setEditContact] = useState(null);
   const [importResult, setImportResult] = useState(null);
+  const fileInputRef = useRef(null);
   const [sidebarExpanded, setSidebarExpanded] = useState({ smart: true, collections: true });
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -229,6 +230,7 @@ export default function ContactsPage() {
       onSuccess: ({ data }) => { setImportResult(data); invalidateContacts(); },
       onError: (err) => { setImportResult({ error: err.response?.data?.detail || err.message }); },
     });
+    // Reset so picking the same file twice still fires onChange
     e.target.value = '';
   };
 
@@ -303,12 +305,25 @@ export default function ContactsPage() {
           <Button variant="outline" size="sm" onClick={handleDownloadTemplate} className="gap-1.5 h-9" data-testid="download-contact-template-btn">
             <FileSpreadsheet className="w-4 h-4" /> Template
           </Button>
-          <label className="cursor-pointer inline-flex">
-            <Button variant="outline" size="sm" className="gap-1.5 pointer-events-none h-9" data-testid="import-contacts-csv">
-              <Upload className="w-4 h-4" /> {importMutation.isPending ? 'Importing…' : 'Import'}
-            </Button>
-            <input type="file" accept=".csv,.xlsx,.xls" onChange={handleImportCSV} className="hidden" disabled={importMutation.isPending} />
-          </label>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={importMutation.isPending}
+            className="gap-1.5 h-9"
+            data-testid="import-contacts-csv"
+          >
+            <Upload className="w-4 h-4" /> {importMutation.isPending ? 'Importing…' : 'Import'}
+          </Button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,.xlsx,.xls"
+            onChange={handleImportCSV}
+            className="hidden"
+            disabled={importMutation.isPending}
+            data-testid="import-contacts-file-input"
+          />
           <Dialog open={showAdd} onOpenChange={setShowAdd}>
             <DialogTrigger asChild>
               <Button variant="brand" size="sm" className="gap-2 h-9" data-testid="add-contact-button">
