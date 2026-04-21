@@ -15,6 +15,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Textarea } from '../components/ui/textarea';
 import { Checkbox } from '../components/ui/checkbox';
 import { Badge } from '../components/ui/badge';
+import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
+import { Calendar as CalendarWidget } from '../components/ui/calendar';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuCheckboxItem } from '../components/ui/dropdown-menu';
 import {
   useContacts, useDeals, useProperties, useUpdateTask, useDeleteTask,
@@ -281,29 +283,81 @@ function CompleteLogDialog({ task, open, onClose }) {
   );
 }
 
+// Half-hour time slot options, 12h label + 24h value
+const TIME_SLOTS = (() => {
+  const out = [];
+  for (let h = 0; h < 24; h++) {
+    for (const m of [0, 30]) {
+      const hh = String(h).padStart(2, '0');
+      const mm = String(m).padStart(2, '0');
+      const value = `${hh}:${mm}`;
+      const period = h >= 12 ? 'PM' : 'AM';
+      const h12 = ((h + 11) % 12) + 1;
+      out.push({ value, label: `${h12}:${mm} ${period}` });
+    }
+  }
+  return out;
+})();
+
+function splitIsoToDateTime(iso) {
+  if (!iso) return { date: '', time: '' };
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return { date: '', time: '' };
+    const date = d.toISOString().slice(0, 10);
+    // Use local-time HH:mm rounded down to nearest 30 min
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mins = d.getMinutes() < 30 ? '00' : '30';
+    return { date, time: `${hh}:${mins}` };
+  } catch { return { date: '', time: '' }; }
+}
+
+function formatDateForDisplay(yyyyMmDd) {
+  if (!yyyyMmDd) return 'Pick a date';
+  try {
+    const [y, m, d] = yyyyMmDd.split('-').map(Number);
+    const dt = new Date(y, m - 1, d);
+    return dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+  } catch { return yyyyMmDd; }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Task Form (create / edit)
 // ─────────────────────────────────────────────────────────────────────────────
 function TaskForm({ initial, contacts, properties, onSubmit }) {
+  const initDT = splitIsoToDateTime(initial?.due_date);
   const [form, setForm] = useState({
     title: initial?.title || '',
     description: initial?.description || '',
-    due_date: initial?.due_date ? new Date(initial.due_date).toISOString().slice(0, 16) : '',
+    due_date_only: initDT.date,
+    due_time: initDT.time || '09:00',
     contact_id: initial?.contact_id || '',
     property_id: initial?.property_id || '',
     task_type: initial?.task_type || 'other',
     priority: initial?.priority || 'medium',
     all_day: initial?.all_day || false,
   });
+  const [dateOpen, setDateOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setSubmitting(true);
     try {
-      const payload = { ...form };
-      // Convert datetime-local input to ISO
-      if (payload.due_date) payload.due_date = new Date(payload.due_date).toISOString();
+      const { due_date_only, due_time, all_day, ...rest } = form;
+      const payload = { ...rest, all_day };
+      if (due_date_only) {
+        // For all-day tasks, anchor to 00:00 local; else use picked time
+        const [y, m, d] = due_date_only.split('-').map(Number);
+        let hh = 0, mm = 0;
+        if (!all_day && due_time) {
+          const [th, tm] = due_time.split(':').map(Number);
+          hh = th; mm = tm;
+        }
+        payload.due_date = new Date(y, m - 1, d, hh, mm, 0).toISOString();
+      } else {
+        payload.due_date = '';
+      }
       if (payload.contact_id === 'none') payload.contact_id = '';
       if (payload.property_id === 'none') payload.property_id = '';
       await onSubmit(payload);
@@ -341,14 +395,58 @@ function TaskForm({ initial, contacts, properties, onSubmit }) {
           </Select>
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <Label className="text-[12px] font-semibold mb-1.5 block">Due date & time</Label>
-          <Input type="datetime-local" value={form.due_date} onChange={e => setForm({ ...form, due_date: e.target.value })} className="h-9 text-[13px]" data-testid="task-form-due" />
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="sm:col-span-1">
+          <Label className="text-[12px] font-semibold mb-1.5 block">Due date</Label>
+          <Popover open={dateOpen} onOpenChange={setDateOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                className={`w-full h-9 text-[13px] justify-start font-normal ${!form.due_date_only ? 'text-slate-400 dark:text-slate-500' : ''}`}
+                data-testid="task-form-due-date"
+              >
+                <CalendarDays className="w-3.5 h-3.5 mr-2 shrink-0" />
+                {formatDateForDisplay(form.due_date_only)}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-auto p-0" data-testid="task-form-due-calendar">
+              <CalendarWidget
+                mode="single"
+                selected={form.due_date_only ? new Date(`${form.due_date_only}T12:00:00`) : undefined}
+                onSelect={(d) => {
+                  if (!d) return;
+                  const y = d.getFullYear();
+                  const m = String(d.getMonth() + 1).padStart(2, '0');
+                  const day = String(d.getDate()).padStart(2, '0');
+                  setForm({ ...form, due_date_only: `${y}-${m}-${day}` });
+                  setDateOpen(false);
+                }}
+                initialFocus
+              />
+            </PopoverContent>
+          </Popover>
         </div>
-        <div className="flex items-end">
-          <label className="flex items-center gap-2 text-[12px] font-semibold text-slate-700 dark:text-slate-300 select-none">
-            <Checkbox checked={form.all_day} onCheckedChange={(v) => setForm({ ...form, all_day: !!v })} /> All day
+        <div className="sm:col-span-1">
+          <Label className="text-[12px] font-semibold mb-1.5 block">Time</Label>
+          <Select
+            value={form.due_time}
+            onValueChange={(v) => setForm({ ...form, due_time: v })}
+            disabled={form.all_day}
+          >
+            <SelectTrigger className="h-9 text-[13px]" data-testid="task-form-due-time">
+              <SelectValue placeholder="Pick a time" />
+            </SelectTrigger>
+            <SelectContent className="max-h-[260px]">
+              {TIME_SLOTS.map(t => (
+                <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="sm:col-span-1 flex items-end">
+          <label className="flex items-center gap-2 text-[12px] font-semibold text-slate-700 dark:text-slate-300 select-none h-9">
+            <Checkbox checked={form.all_day} onCheckedChange={(v) => setForm({ ...form, all_day: !!v })} data-testid="task-form-all-day" /> All day
           </label>
         </div>
       </div>
