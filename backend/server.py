@@ -5776,6 +5776,154 @@ async def brokerage_sheet_sync_worker():
             logger.exception(f"Sheet worker loop error: {e}")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# TWILIO: Status check + Inbound SMS webhook
+# - /api/twilio/status → verify creds by fetching account from Twilio REST API
+# - /api/twilio/inbound-sms → Twilio calls this when an SMS is received on our
+#   number. Matches the sender's phone to a contact, logs the message into the
+#   unified inbox, and records an activity. Returns empty TwiML.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _normalize_phone_digits(p: str) -> str:
+    """Return last-10 digit string for comparison (strip country code for US)."""
+    if not p:
+        return ""
+    digits = re.sub(r"\D", "", p)
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits
+
+
+@api_router.get("/twilio/status")
+async def twilio_status(user=Depends(get_any_auth_user)):
+    """Verify Twilio creds are valid by fetching account info."""
+    acct = settings.TWILIO_ACCOUNT_SID
+    tok = settings.TWILIO_AUTH_TOKEN
+    frm = settings.TWILIO_PHONE_NUMBER
+    if not (acct and tok and frm):
+        return {"configured": False, "reason": "Missing TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_PHONE_NUMBER"}
+    try:
+        from twilio.rest import Client as TwilioClient
+        from twilio.base.exceptions import TwilioRestException
+        def _fetch():
+            return TwilioClient(acct, tok).api.accounts(acct).fetch()
+        info = await asyncio.to_thread(_fetch)
+        return {
+            "configured": True,
+            "account_sid": acct,
+            "account_status": getattr(info, "status", "unknown"),
+            "account_type": getattr(info, "type", "unknown"),  # "Trial" or "Full"
+            "friendly_name": getattr(info, "friendly_name", ""),
+            "from_number": frm,
+            "inbound_webhook_url": f"{FRONTEND_URL}/api/twilio/inbound-sms",
+        }
+    except Exception as e:
+        logger.error(f"Twilio status check failed: {e}")
+        return {"configured": False, "reason": f"Twilio API error: {str(e)[:200]}"}
+
+
+@api_router.post("/twilio/inbound-sms")
+async def twilio_inbound_sms(request: Request):
+    """
+    Twilio webhook — called when an SMS is received on our Twilio number.
+    Configure in Twilio Console → Phone Numbers → <number> → 'A MESSAGE COMES IN'
+    (HTTP POST) → paste the URL returned by /api/twilio/status.
+    """
+    try:
+        form = await request.form()
+    except Exception as e:
+        logger.error(f"Twilio inbound-sms: cannot parse form body: {e}")
+        return Response(content="<Response></Response>", media_type="application/xml")
+    form_dict = {k: str(v) for k, v in form.items()}
+
+    # Signature validation (skipped silently if token missing — e.g. in tests)
+    auth_token = settings.TWILIO_AUTH_TOKEN
+    signature = request.headers.get("X-Twilio-Signature", "")
+    if auth_token and signature:
+        try:
+            from twilio.request_validator import RequestValidator as _TwRequestValidator
+            # Twilio signs the public URL. Prefer FRONTEND_URL + path so it matches
+            # exactly what's configured in the Twilio console, regardless of proxy.
+            public_url = f"{FRONTEND_URL}{request.url.path}"
+            if not _TwRequestValidator(auth_token).validate(public_url, form_dict, signature):
+                logger.warning(f"Twilio inbound-sms: invalid signature from {form_dict.get('From', '?')}")
+                return Response(content="<Response></Response>", media_type="application/xml", status_code=403)
+        except Exception as e:
+            logger.error(f"Twilio signature validation error: {e}")
+            # Fail open in MVP — still process the message
+
+    from_number = form_dict.get("From", "")
+    to_number = form_dict.get("To", "")
+    body = form_dict.get("Body", "")
+    external_id = form_dict.get("MessageSid", "")
+
+    if not from_number or not body:
+        logger.warning(f"Twilio inbound-sms missing From/Body: keys={list(form_dict.keys())}")
+        return Response(content="<Response></Response>", media_type="application/xml")
+
+    # Match inbound phone to a contact by normalized digits
+    norm_from = _normalize_phone_digits(from_number)
+    matched_contact = None
+    if norm_from:
+        async for c in db.contacts.find({"phone": {"$exists": True, "$ne": ""}}):
+            if _normalize_phone_digits(c.get("phone", "")) == norm_from:
+                matched_contact = c
+                break
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    if not matched_contact:
+        # Orphan message — still log so admins can see it. Find any admin user
+        # to own the record so it surfaces somewhere.
+        admin_doc = await db.users.find_one({"role": "admin"})
+        admin_id = str(admin_doc["_id"]) if admin_doc else ""
+        await db.messages.insert_one({
+            "user_id": admin_id,
+            "contact_id": "",
+            "channel": "sms",
+            "direction": "inbound",
+            "subject": "",
+            "body": body,
+            "from_addr": from_number,
+            "to_addr": to_number,
+            "external_id": external_id,
+            "read": False,
+            "created_at": now_iso,
+            "unmatched": True,
+        })
+        logger.info(f"Twilio inbound SMS from UNMATCHED {from_number}: {body[:80]}")
+        return Response(content="<Response></Response>", media_type="application/xml")
+
+    owner_id = matched_contact.get("user_id") or ""
+    if not owner_id:
+        admin_doc = await db.users.find_one({"role": "admin"})
+        owner_id = str(admin_doc["_id"]) if admin_doc else ""
+
+    contact_id = str(matched_contact["_id"])
+
+    await _log_inbox_message(
+        user_id=owner_id,
+        contact_id=contact_id,
+        channel="sms",
+        direction="inbound",
+        body=body,
+        from_addr=from_number,
+        to_addr=to_number,
+        external_id=external_id,
+    )
+
+    await db.activities.insert_one({
+        "contact_id": contact_id,
+        "user_id": owner_id,
+        "activity_type": "sms",
+        "description": f"Received SMS: {body[:80]}",
+        "created_at": now_iso,
+    })
+
+    logger.info(f"Twilio inbound SMS from {from_number} → contact {contact_id}: {body[:80]}")
+    return Response(content="<Response></Response>", media_type="application/xml")
+
+
 app.include_router(api_router)
 
 # ═══════════════════════════════════════════════════════════════════════════════
