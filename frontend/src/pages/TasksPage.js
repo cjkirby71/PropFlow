@@ -317,7 +317,7 @@ function formatDateForDisplay(yyyyMmDd) {
   try {
     const [y, m, d] = yyyyMmDd.split('-').map(Number);
     const dt = new Date(y, m - 1, d);
-    return dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+    return dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
   } catch { return yyyyMmDd; }
 }
 
