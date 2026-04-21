@@ -2,13 +2,14 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import api from '../lib/api';
+import { toast } from 'sonner';
 import { useContacts, useDeleteContact, useImportContacts, useContactSmartCounts } from '../hooks/useApi';
 import {
   Plus, Search, Phone, Mail, Tag, MoreHorizontal, Sparkles, Trash2, Edit, Download, Upload,
   FileSpreadsheet, CheckCircle2, AlertTriangle, XCircle, Users, CalendarCheck, UserPlus, UserCheck,
   FileSignature, TrendingDown, Clock, Zap, Heart, Building2, Home, Award, ChevronRight,
   SlidersHorizontal, RefreshCcw, Columns3, ChevronDown, DollarSign, MapPin, CalendarClock,
-  CheckCheck, X as XIcon, Send, UserCog, ListChecks, CalendarPlus, Filter,
+  CheckCheck, X as XIcon, Send, UserCog, ListChecks, CalendarPlus, Filter, UserX,
 } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -39,6 +40,7 @@ const SMART_LISTS = [
   { id: 'stale_prospects',      label: 'Stale Prospects',              icon: Clock,         color: 'text-amber-600 dark:text-amber-400' },
   { id: 'recently_active',      label: 'Recently Active',              icon: Zap,           color: 'text-emerald-600 dark:text-emerald-400' },
   { id: 'nurture_queue',        label: 'Nurture Queue',                icon: Heart,         color: 'text-pink-600 dark:text-pink-400' },
+  { id: 'recontact_next_year',  label: 'Re-engage Next Year',          icon: UserX,         color: 'text-slate-500 dark:text-slate-400' },
 ];
 
 const COLLECTIONS = [
@@ -198,6 +200,21 @@ export default function ContactsPage() {
       invalidateContacts();
     } catch (err) {
       alert('AI scoring failed: ' + (err.response?.data?.detail || err.message));
+    }
+  };
+
+  const handleMarkRecontactNextYear = async (contact) => {
+    const existing = Array.isArray(contact.tags) ? contact.tags : [];
+    const TAG = 'recontact-next-year';
+    const nextTags = existing.includes(TAG)
+      ? existing.filter((t) => t !== TAG)
+      : [...existing, TAG];
+    try {
+      await api.put(`/contacts/${contact.id}`, { tags: nextTags });
+      invalidateContacts();
+      toast.success(existing.includes(TAG) ? 'Removed from Re-engage Next Year' : 'Moved to Re-engage Next Year — scrub by move-in date next season');
+    } catch (err) {
+      toast.error('Could not update contact');
     }
   };
 
@@ -770,6 +787,9 @@ export default function ContactsPage() {
                                 </DropdownMenuItem>
                                 <DropdownMenuItem onClick={() => handleAIScore(c.id)} data-testid={`score-contact-${c.id}`}>
                                   <Sparkles className="w-4 h-4 mr-2 text-brand-accent" /> AI Score
+                                </DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => handleMarkRecontactNextYear(c)} data-testid={`recontact-contact-${c.id}`}>
+                                  <UserX className="w-4 h-4 mr-2 text-slate-500" /> {(c.tags || []).includes('recontact-next-year') ? 'Remove "Re-engage Next Year"' : 'Move to Re-engage Next Year'}
                                 </DropdownMenuItem>
                                 <DropdownMenuItem onClick={() => handleDelete(c.id)} className="text-rose-600 dark:text-rose-400" data-testid={`delete-contact-${c.id}`}>
                                   <Trash2 className="w-4 h-4 mr-2" /> Delete

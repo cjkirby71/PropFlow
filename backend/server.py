@@ -1167,7 +1167,7 @@ async def create_contact(data: ContactCreate, background_tasks: BackgroundTasks,
 SMART_LIST_IDS = [
     "today_tours_followups", "first_contact", "second_contact",
     "application_submitted", "at_risk_renewals", "stale_prospects",
-    "recently_active", "nurture_queue",
+    "recently_active", "nurture_queue", "recontact_next_year",
 ]
 COLLECTION_IDS = ["prospects", "active_tenants", "past_tenants", "high_value_leads"]
 
@@ -1335,6 +1335,31 @@ async def _build_smart_list_filter(user_id: str, smart_list: str):
 
     if sl == "nurture_queue":
         return {"tags": {"$in": ["nurture", "nurture-queue", "long-term"]}}
+
+    if sl == "recontact_next_year":
+        # Leads who either (a) were explicitly tagged as declined/not-interested,
+        # or (b) went quiet after 3+ contact attempts. They're surfaced here so
+        # they can be scrubbed by move-in date and re-contacted next season.
+        decline_tags = ["declined", "not-interested", "no-response",
+                        "declined-assistance", "recontact-next-year"]
+        act_map = await _contact_activity_count_map(user_id)
+        quiet_cutoff_ids = await _contact_ids_with_recent_activity(user_id, within_hours=30 * 24)
+        unresponsive_ids = [cid for cid, n in act_map.items()
+                            if n >= 3 and cid not in quiet_cutoff_ids]
+        conds = [{"tags": {"$in": decline_tags}}]
+        if unresponsive_ids:
+            conds.append({
+                "$and": [
+                    {"id": {"$in": unresponsive_ids}},
+                    {"$or": [
+                        {"client_type": {"$in": ["lead", "prospect"]}},
+                        {"client_type": {"$exists": False}},
+                        {"client_type": None},
+                        {"client_type": ""},
+                    ]},
+                ],
+            })
+        return {"$or": conds}
 
     return None
 
