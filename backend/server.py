@@ -333,10 +333,12 @@ def verify_password(plain: str, hashed: str) -> bool:
 def get_jwt_secret():
     return settings.JWT_SECRET
 
-def create_access_token(user_id: str, email: str) -> str:
+def create_access_token(user_id: str, email: str, tenant_id: str = "", role: str = "user") -> str:
     # SECURITY: Access token expires in 15 minutes (short-lived)
+    # Phase 0: tenant_id + role baked into JWT for multi-tenant isolation
     return jwt.encode(
-        {"sub": user_id, "email": email, "exp": datetime.now(timezone.utc) + timedelta(minutes=15), "type": "access"},
+        {"sub": user_id, "email": email, "tenant_id": tenant_id, "role": role,
+         "exp": datetime.now(timezone.utc) + timedelta(minutes=15), "type": "access"},
         get_jwt_secret(), algorithm=JWT_ALGORITHM
     )
 
@@ -383,6 +385,9 @@ async def get_current_user(request: Request) -> dict:
             raise HTTPException(status_code=401, detail="User not found")
         user["_id"] = str(user["_id"])
         user.pop("password_hash", None)
+        # Phase 0: surface tenant context from JWT (falls back to user doc for legacy tokens)
+        user["tenant_id"] = payload.get("tenant_id") or user.get("tenant_id") or user["_id"]
+        user["role"] = payload.get("role") or user.get("role", "user")
         return user
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
@@ -402,6 +407,9 @@ async def get_api_key_user(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="User not found")
     user["_id"] = str(user["_id"])
     user.pop("password_hash", None)
+    # Phase 0: tenant context (API keys are bound to a single tenant via owning user)
+    user["tenant_id"] = key_doc.get("tenant_id") or user.get("tenant_id") or user["_id"]
+    user["role"] = user.get("role", "user")
     await db.api_keys.update_one({"_id": key_doc["_id"]}, {"$set": {"last_used": datetime.now(timezone.utc).isoformat()}})
     return user
 
@@ -411,6 +419,275 @@ async def get_any_auth_user(request: Request) -> dict:
         return await get_current_user(request)
     except HTTPException:
         return await get_api_key_user(request)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHASE 0 — MULTI-TENANCY FOUNDATION (Elara Second Brain prep)
+#
+# Privacy guarantees enforced from day 1:
+#   - Layer 1 (Identity): JWT carries tenant_id + role
+#   - Layer 2 (Data):     tenants collection; every business record has tenant_id
+#   - Layer 3 (Repo):     TenantDB wrapper requires tenant_id on every query
+#   - Layer 4 (LLM/mem):  Elara collections scoped (tenant_id, user_id, ...)
+#   - Layer 5 (Audit):    elara_audit logs every tool call by (tenant_id, user_id)
+#
+# Tenant model:
+#   - "starter"      = 1 user = 1 tenant   (solo agent / personal Second Brain)
+#   - "professional" = 1 user, paid plan, full Elara features
+#   - "enterprise"   = 1 org = 1 tenant w/ multiple users (org-shared CRM data,
+#                     user-private Second Brain data via visibility:'private')
+#
+# Migration is idempotent and runs on every startup. For existing solo users,
+# tenant_id is set to str(user._id), making the existing user_id filter on every
+# query effectively a tenant filter — zero regression risk.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+VALID_PLANS = ("starter", "professional", "enterprise")
+
+# Collections that hold tenant-owned business data and need a tenant_id backfill
+TENANT_SCOPED_COLLECTIONS = (
+    "contacts", "deals", "properties", "units", "leases", "tasks",
+    "calendar_events", "activities", "templates", "sequences",
+    "sequence_executions", "webhooks", "messages", "inbox_threads",
+    "inbox_drafts", "contact_files", "maintenance_tickets", "api_keys",
+    "org_settings", "google_tokens", "oauth_states",
+)
+
+# Elara-specific collections (introduced in Phase 0; populated in Phase 1+)
+ELARA_COLLECTIONS = (
+    "elara_conversations",  # one per chat session per user
+    "elara_messages",       # turns within a conversation
+    "elara_memory",         # long-term per-user memory (notes/entities/patterns)
+    "elara_tasks",          # tasks Elara is owning / working on
+    "elara_activity",       # what Elara has done (tool calls, decisions)
+    "elara_pending_actions",# drafts awaiting user approval
+    "elara_audit",          # tamper-resistant audit log of every tool call
+    "elara_documents",      # generic per-tenant note store (replaces Obsidian
+                            # for non-Craig users; uses Obsidian for tenant=Craig)
+)
+
+
+async def _ensure_tenant_for_user(user_doc: dict) -> str:
+    """Get-or-create a solo tenant for a user. Returns the tenant_id (string).
+    Idempotent: safe to call repeatedly. For new signups + migration.
+    """
+    user_id = str(user_doc["_id"])
+    # Already has a tenant assigned? Trust it.
+    if user_doc.get("tenant_id"):
+        existing = await db.tenants.find_one({"_id": user_doc["tenant_id"]})
+        if existing:
+            return user_doc["tenant_id"]
+    # Solo-tenant convention: tenant_id == str(user._id)
+    tenant_id = user_id
+    existing = await db.tenants.find_one({"_id": tenant_id})
+    if not existing:
+        await db.tenants.insert_one({
+            "_id": tenant_id,
+            "name": user_doc.get("name", user_doc.get("email", "Untitled")),
+            "plan": "starter",
+            "owner_user_id": user_id,
+            "members": [user_id],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        logger.info(f"Phase 0: created solo tenant {tenant_id} for user {user_doc.get('email')}")
+    # Stamp the user with their tenant_id so future queries are fast
+    if user_doc.get("tenant_id") != tenant_id:
+        await db.users.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": {"tenant_id": tenant_id}},
+        )
+    return tenant_id
+
+
+async def migrate_to_multi_tenant() -> None:
+    """One-time (idempotent) Phase-0 migration.
+    - Creates a solo tenant for every user that doesn't have one
+    - Backfills tenant_id on every record across TENANT_SCOPED_COLLECTIONS
+    - Logs counts so we can verify
+    Safe to call on every startup; no-op once data is migrated.
+    """
+    logger.info("Phase 0 migration: starting tenant backfill…")
+
+    # 1) Ensure every user has a tenant
+    users_processed = 0
+    async for u in db.users.find({}):
+        await _ensure_tenant_for_user(u)
+        users_processed += 1
+    logger.info(f"Phase 0 migration: ensured tenants for {users_processed} users")
+
+    # 2) Backfill tenant_id on every business collection
+    # We use MongoDB's aggregation-pipeline updateMany to set tenant_id = user_id
+    # (string) on documents that have a user_id but no tenant_id. Atomic + fast.
+    total_backfilled = 0
+    for coll_name in TENANT_SCOPED_COLLECTIONS:
+        try:
+            res = await db[coll_name].update_many(
+                {"tenant_id": {"$exists": False}, "user_id": {"$exists": True, "$ne": ""}},
+                [{"$set": {"tenant_id": "$user_id"}}],
+            )
+            if res.modified_count:
+                logger.info(f"Phase 0: backfilled tenant_id on {res.modified_count} {coll_name}")
+                total_backfilled += res.modified_count
+        except Exception as e:
+            logger.warning(f"Phase 0: tenant_id backfill skipped for {coll_name}: {e}")
+    logger.info(f"Phase 0 migration: total documents backfilled = {total_backfilled}")
+
+
+async def create_tenant_indexes() -> None:
+    """Indexes for tenancy + Elara collections. Idempotent."""
+    # tenants collection
+    await db.tenants.create_index("owner_user_id", background=True)
+    await db.tenants.create_index("plan", background=True)
+    # users: tenant_id lookup
+    await db.users.create_index("tenant_id", background=True, sparse=True)
+    # Compound (tenant_id, user_id) on every tenant-scoped collection
+    for coll_name in TENANT_SCOPED_COLLECTIONS:
+        try:
+            await db[coll_name].create_index(
+                [("tenant_id", 1), ("user_id", 1)],
+                background=True,
+                name=f"idx_{coll_name}_tenant_user",
+                sparse=True,
+            )
+        except Exception as e:
+            logger.warning(f"Phase 0: index creation skipped for {coll_name}: {e}")
+    # Elara collections
+    for coll_name in ELARA_COLLECTIONS:
+        try:
+            await db[coll_name].create_index(
+                [("tenant_id", 1), ("user_id", 1), ("created_at", -1)],
+                background=True,
+                name=f"idx_{coll_name}_tenant_user_created",
+            )
+        except Exception as e:
+            logger.warning(f"Phase 0: index creation skipped for {coll_name}: {e}")
+    # Audit log: also index by tool name for quick filtering
+    try:
+        await db.elara_audit.create_index(
+            [("tenant_id", 1), ("tool", 1), ("created_at", -1)],
+            background=True, name="idx_elara_audit_tenant_tool"
+        )
+    except Exception:
+        pass
+    logger.info("Phase 0: tenant + Elara indexes ensured")
+
+
+class TenantDB:
+    """Thin wrapper around motor's database that injects tenant_id into every
+    query/insert. Used by Phase-1+ Elara code. Raises if tenant_id is missing.
+
+    Usage:
+        tdb = TenantDB(db, tenant_id="abc123")
+        await tdb.find_one("elara_memory", {"user_id": uid})
+        # → motor query: {"tenant_id": "abc123", "user_id": uid}
+    """
+    def __init__(self, mongo_db, tenant_id: str):
+        if not tenant_id or not isinstance(tenant_id, str):
+            raise RuntimeError("TenantDB requires a non-empty tenant_id string")
+        self._db = mongo_db
+        self.tenant_id = tenant_id
+
+    def _scope(self, q: dict) -> dict:
+        q = dict(q or {})
+        # Never let a caller bypass tenant scoping by passing tenant_id explicitly
+        q["tenant_id"] = self.tenant_id
+        return q
+
+    async def find_one(self, coll: str, q: dict, projection: Optional[dict] = None):
+        return await self._db[coll].find_one(self._scope(q), projection)
+
+    async def find_many(self, coll: str, q: dict, *, limit: int = 100,
+                        sort: Optional[list] = None, skip: int = 0,
+                        projection: Optional[dict] = None) -> list:
+        cur = self._db[coll].find(self._scope(q), projection)
+        if sort:
+            cur = cur.sort(sort)
+        if skip:
+            cur = cur.skip(skip)
+        if limit:
+            cur = cur.limit(limit)
+        return await cur.to_list(limit if limit else 1000)
+
+    async def insert_one(self, coll: str, doc: dict) -> str:
+        d = dict(doc)
+        d["tenant_id"] = self.tenant_id
+        d.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+        res = await self._db[coll].insert_one(d)
+        return str(res.inserted_id)
+
+    async def update_one(self, coll: str, q: dict, update: dict, *, upsert: bool = False):
+        return await self._db[coll].update_one(self._scope(q), update, upsert=upsert)
+
+    async def update_many(self, coll: str, q: dict, update: dict):
+        return await self._db[coll].update_many(self._scope(q), update)
+
+    async def delete_one(self, coll: str, q: dict):
+        return await self._db[coll].delete_one(self._scope(q))
+
+    async def delete_many(self, coll: str, q: dict):
+        return await self._db[coll].delete_many(self._scope(q))
+
+    async def count(self, coll: str, q: Optional[dict] = None) -> int:
+        return await self._db[coll].count_documents(self._scope(q or {}))
+
+    async def aggregate(self, coll: str, pipeline: list) -> list:
+        """Prepends a $match on tenant_id so cross-tenant aggregation is impossible."""
+        scoped_pipeline = [{"$match": {"tenant_id": self.tenant_id}}] + list(pipeline)
+        return await self._db[coll].aggregate(scoped_pipeline).to_list(10000)
+
+
+async def get_tenant_context(request: Request) -> dict:
+    """Phase-0 auth dependency. Returns a tenant-aware context dict:
+      {user_id, tenant_id, email, name, role, plan}
+    Drop-in replacement for `get_any_auth_user` when an endpoint needs the
+    tenant plan or wants to use TenantDB. Defaults to solo behavior for legacy
+    users (tenant_id == user_id).
+    """
+    user = await get_any_auth_user(request)
+    tenant_id = user.get("tenant_id") or user["_id"]
+    # Fetch plan (and confirm tenant exists; auto-heal if missing)
+    tenant = await db.tenants.find_one({"_id": tenant_id})
+    if not tenant:
+        tenant_id = await _ensure_tenant_for_user(user)
+        tenant = await db.tenants.find_one({"_id": tenant_id})
+    return {
+        "user_id": user["_id"],
+        "tenant_id": tenant_id,
+        "email": user.get("email", ""),
+        "name": user.get("name", ""),
+        "role": user.get("role", "user"),
+        "plan": (tenant or {}).get("plan", "starter"),
+        "tenant_name": (tenant or {}).get("name", ""),
+    }
+
+
+async def audit_log(tenant_id: str, user_id: str, tool: str,
+                    inputs: Optional[dict] = None,
+                    outputs: Optional[dict] = None,
+                    status: str = "ok",
+                    error: str = "") -> None:
+    """Append-only audit log for Elara tool calls and other privileged actions.
+    Never raises — failures are logged but don't break the caller."""
+    try:
+        await db.elara_audit.insert_one({
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "tool": tool,
+            "inputs": inputs or {},
+            "outputs": (outputs or {}) if status == "ok" else {},
+            "status": status,
+            "error": error[:500] if error else "",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        logger.warning(f"audit_log failed for tool={tool}: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# END PHASE 0 — MULTI-TENANCY FOUNDATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SECURITY: Input Validation Models (Pydantic)
@@ -1031,10 +1308,14 @@ async def register(data: RegisterInput, request: Request, response: Response):
     }
     result = await db.users.insert_one(user_doc)
     user_id = str(result.inserted_id)
-    access = create_access_token(user_id, email)
+    # Phase 0: create solo tenant for the new user and stamp tenant_id
+    user_doc["_id"] = result.inserted_id
+    tenant_id = await _ensure_tenant_for_user(user_doc)
+    access = create_access_token(user_id, email, tenant_id=tenant_id, role="user")
     refresh = create_refresh_token(user_id)
     set_auth_cookies(response, access, refresh)
-    return {"id": user_id, "email": email, "name": data.name, "role": "user"}
+    return {"id": user_id, "email": email, "name": data.name, "role": "user",
+            "tenant_id": tenant_id, "plan": "starter"}
 
 @api_router.post("/auth/login")
 @limiter.limit("10/minute")
@@ -1062,10 +1343,14 @@ async def login(data: LoginInput, request: Request, response: Response):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     await db.login_attempts.delete_one({"identifier": identifier})
     user_id = str(user["_id"])
-    access = create_access_token(user_id, email)
+    # Phase 0: ensure tenant exists (auto-heal for legacy users) and embed in JWT
+    tenant_id = await _ensure_tenant_for_user(user)
+    role = user.get("role", "user")
+    access = create_access_token(user_id, email, tenant_id=tenant_id, role=role)
     refresh = create_refresh_token(user_id)
     set_auth_cookies(response, access, refresh)
-    return {"id": user_id, "email": email, "name": user.get("name", ""), "role": user.get("role", "user")}
+    return {"id": user_id, "email": email, "name": user.get("name", ""), "role": role,
+            "tenant_id": tenant_id}
 
 @api_router.post("/auth/logout")
 async def logout(response: Response):
@@ -1075,6 +1360,12 @@ async def logout(response: Response):
 
 @api_router.get("/auth/me")
 async def get_me(user=Depends(get_current_user)):
+    # Phase 0: enrich with tenant context
+    tenant_id = user.get("tenant_id") or user["_id"]
+    tenant = await db.tenants.find_one({"_id": tenant_id})
+    user["tenant_id"] = tenant_id
+    user["plan"] = (tenant or {}).get("plan", "starter")
+    user["tenant_name"] = (tenant or {}).get("name", "")
     return user
 
 @api_router.post("/auth/refresh")
@@ -1090,7 +1381,10 @@ async def refresh_token(request: Request, response: Response):
         user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
-        access = create_access_token(str(user["_id"]), user["email"])
+        # Phase 0: re-embed tenant_id + role into the refreshed access token
+        tenant_id = user.get("tenant_id") or await _ensure_tenant_for_user(user)
+        role = user.get("role", "user")
+        access = create_access_token(str(user["_id"]), user["email"], tenant_id=tenant_id, role=role)
         # SECURITY: Use the centralized set_auth_cookies helper for consistent cookie settings
         response.set_cookie(
             key="access_token", value=access,
@@ -4714,6 +5008,8 @@ async def startup():
     await create_mongodb_indexes()
     await create_profile_indexes()
     await create_inbox_indexes()
+    # ── Phase 0: multi-tenancy foundation (idempotent) ──
+    await create_tenant_indexes()
     # ── Phase 10: one-time migration ──
     await migrate_residential_lease_to_lease_applications()
 
@@ -4733,6 +5029,9 @@ async def startup():
     elif not verify_password(admin_password, existing["password_hash"]):
         await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_password)}})
         logger.info("Admin password updated")
+
+    # ── Phase 0: backfill tenants for all users (idempotent; runs AFTER admin seed) ──
+    await migrate_to_multi_tenant()
     # Write test credentials
     os.makedirs("/app/memory", exist_ok=True)
     with open("/app/memory/test_credentials.md", "w") as f:
@@ -5922,6 +6221,113 @@ async def twilio_inbound_sms(request: Request):
 
     logger.info(f"Twilio inbound SMS from {from_number} → contact {contact_id}: {body[:80]}")
     return Response(content="<Response></Response>", media_type="application/xml")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHASE 0 — Tenant API endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TenantUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=200)
+    plan: Optional[str] = Field(default=None, max_length=20)
+
+    @field_validator("plan")
+    @classmethod
+    def validate_plan(cls, v):
+        if v is not None and v not in VALID_PLANS:
+            raise ValueError(f"plan must be one of: {', '.join(VALID_PLANS)}")
+        return v
+
+
+@api_router.get("/tenants/me")
+async def tenants_me(ctx=Depends(get_tenant_context)):
+    """Return the current user's tenant + plan + role.
+    Frontend uses this to gate Elara features and Enterprise-only widgets."""
+    tenant = await db.tenants.find_one({"_id": ctx["tenant_id"]})
+    if not tenant:
+        # Defensive: shouldn't happen since get_tenant_context auto-heals
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    # Count members for UI display
+    member_count = await db.users.count_documents({"tenant_id": ctx["tenant_id"]})
+    return {
+        "tenant_id": ctx["tenant_id"],
+        "name": tenant.get("name", ""),
+        "plan": tenant.get("plan", "starter"),
+        "owner_user_id": tenant.get("owner_user_id", ""),
+        "members": tenant.get("members", []),
+        "member_count": member_count,
+        "created_at": tenant.get("created_at", ""),
+        "current_user": {
+            "user_id": ctx["user_id"],
+            "email": ctx["email"],
+            "name": ctx["name"],
+            "role": ctx["role"],
+        },
+    }
+
+
+@api_router.put("/tenants/me")
+async def tenants_update(data: TenantUpdate, ctx=Depends(get_tenant_context)):
+    """Update tenant name or plan. Owner/admin only."""
+    tenant = await db.tenants.find_one({"_id": ctx["tenant_id"]})
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    # Only the owner or an admin role may update
+    if ctx["user_id"] != tenant.get("owner_user_id") and ctx["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Only the tenant owner or admin can update settings")
+    update = {k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None}
+    if not update:
+        return tenant
+    update["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.tenants.update_one({"_id": ctx["tenant_id"]}, {"$set": update})
+    # Audit
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "tenant.update",
+                    inputs=update, status="ok")
+    refreshed = await db.tenants.find_one({"_id": ctx["tenant_id"]})
+    return refreshed
+
+
+@api_router.get("/tenants/audit")
+async def tenants_audit(
+    ctx=Depends(get_tenant_context),
+    tool: Optional[str] = None,
+    limit: int = 50,
+    skip: int = 0,
+):
+    """Return the audit log for THIS tenant only. Admin/owner only.
+    Filter by tool name optionally. Returns newest first."""
+    tenant = await db.tenants.find_one({"_id": ctx["tenant_id"]})
+    if ctx["user_id"] != (tenant or {}).get("owner_user_id") and ctx["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Audit log is owner/admin only")
+    q = {"tenant_id": ctx["tenant_id"]}
+    if tool:
+        q["tool"] = tool
+    limit = max(1, min(int(limit or 50), 500))
+    skip = max(0, int(skip or 0))
+    cur = db.elara_audit.find(q, {"_id": 0}).sort("created_at", -1).skip(skip).limit(limit)
+    items = await cur.to_list(limit)
+    total = await db.elara_audit.count_documents(q)
+    return {"items": items, "total": total, "limit": limit, "skip": skip}
+
+
+@api_router.get("/tenants/privacy-check")
+async def tenants_privacy_check(ctx=Depends(get_tenant_context)):
+    """Self-diagnostic: how many records in each collection belong to this
+    tenant vs other tenants. Used by the Privacy panel in Settings to give the
+    user visual proof of isolation."""
+    out = {}
+    for coll_name in TENANT_SCOPED_COLLECTIONS + ELARA_COLLECTIONS:
+        try:
+            mine = await db[coll_name].count_documents({"tenant_id": ctx["tenant_id"]})
+            total = await db[coll_name].count_documents({})
+            out[coll_name] = {"mine": mine, "total": total, "isolated": total - mine}
+        except Exception:
+            out[coll_name] = {"mine": 0, "total": 0, "isolated": 0}
+    return {
+        "tenant_id": ctx["tenant_id"],
+        "plan": ctx["plan"],
+        "collections": out,
+    }
 
 
 app.include_router(api_router)
