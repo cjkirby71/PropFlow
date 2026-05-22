@@ -18,8 +18,9 @@ import traceback
 import httpx
 import asyncio
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from datetime import datetime, timezone, timedelta
+import uuid
 from bson import ObjectId
 import math
 from slowapi import Limiter
@@ -6328,6 +6329,999 @@ async def tenants_privacy_check(ctx=Depends(get_tenant_context)):
         "plan": ctx["plan"],
         "collections": out,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHASE 1 — ELARA BRIDGE (per-tenant service tokens + tool endpoints + LLM proxy)
+#
+# Architecture:
+#   • Elara on Replit holds a per-tenant service token (Bearer "elara_<id>.<secret>")
+#   • Every /api/elara/tools/* call is tenant-scoped via the token
+#   • Every action is audit-logged to elara_audit
+#   • LLM proxy at /api/elara/llm/v1/chat/completions translates OpenAI-format
+#     calls into emergentintegrations (PropFlow holds the EMERGENT_LLM_KEY, so
+#     all of Elara's LLM costs are billed against the tenant in PropFlow)
+#
+# Auth model:
+#   • Service tokens are bound to a tenant_id + optional user_id
+#   • Token = "elara_<token_id>.<random_secret>" (38+ chars)
+#   • We store only sha256(secret) — plaintext returned exactly once on mint
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import hashlib as _hashlib
+
+ELARA_TOKEN_PREFIX = "elara_"
+ELARA_LLM_AVAILABLE_MODELS = {
+    "openai": {"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.2", "gpt-5.1", "gpt-5",
+               "gpt-5-mini", "gpt-5-nano", "gpt-4", "gpt-4o", "gpt-4.1",
+               "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4.1-2025-04-14",
+               "o3", "o3-pro", "o4-mini", "o1"},
+    "anthropic": {"claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-6",
+                  "claude-sonnet-4-5-20250929", "claude-haiku-4-5-20251001",
+                  "claude-opus-4-5-20251101", "claude-4-sonnet-20250514",
+                  "claude-4-opus-20250514"},
+    "gemini": {"gemini-3.1-pro-preview", "gemini-3-flash-preview",
+               "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"},
+}
+ELARA_DEFAULT_MODEL = ("openai", "gpt-5.4")
+
+
+def _elara_resolve_model(model: str) -> Tuple[str, str]:
+    """Resolve 'openai/gpt-4o', 'gpt-5.4', 'anthropic/claude-sonnet-4-6' etc into
+    (provider, model) tuple. Falls back to default if unknown."""
+    if not model:
+        return ELARA_DEFAULT_MODEL
+    m = model.strip()
+    # Strip "openai/" "anthropic/" "gemini/" prefixes that LiteLLM appends
+    if "/" in m:
+        provider, name = m.split("/", 1)
+        provider = provider.lower()
+        if provider in ELARA_LLM_AVAILABLE_MODELS and name in ELARA_LLM_AVAILABLE_MODELS[provider]:
+            return (provider, name)
+    # No prefix → guess provider from name
+    for provider, names in ELARA_LLM_AVAILABLE_MODELS.items():
+        if m in names:
+            return (provider, m)
+    # Fallback
+    logger.warning(f"Elara LLM proxy: unknown model '{model}', falling back to {ELARA_DEFAULT_MODEL}")
+    return ELARA_DEFAULT_MODEL
+
+
+def _mint_service_token_value() -> Tuple[str, str, str]:
+    """Returns (token_id, secret, full_token_str). token_id is short, public-safe.
+    Full token format: 'elara_<token_id>.<secret>'. We persist sha256(secret)."""
+    token_id = secrets.token_hex(6)               # 12 chars
+    secret = secrets.token_urlsafe(32)            # ~43 chars
+    full = f"{ELARA_TOKEN_PREFIX}{token_id}.{secret}"
+    return token_id, secret, full
+
+
+def _hash_secret(secret: str) -> str:
+    return _hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+async def get_elara_caller(request: Request) -> dict:
+    """Auth dependency for /api/elara/*. Accepts EITHER:
+      • A regular user session cookie (existing JWT) → tenant from JWT
+      • A per-tenant service Bearer token 'elara_<id>.<secret>' → tenant from token
+    Returns: {user_id, tenant_id, role, plan, auth_method, token_id?}
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token_str = auth_header[7:].strip()
+        if token_str.startswith(ELARA_TOKEN_PREFIX) and "." in token_str:
+            stripped = token_str[len(ELARA_TOKEN_PREFIX):]
+            try:
+                token_id, secret = stripped.split(".", 1)
+            except ValueError:
+                raise HTTPException(status_code=401, detail="Malformed Elara service token")
+            token_doc = await db.elara_service_tokens.find_one({"token_id": token_id, "revoked_at": {"$in": [None, ""]}})
+            if not token_doc:
+                raise HTTPException(status_code=401, detail="Invalid or revoked Elara service token")
+            if token_doc.get("secret_hash") != _hash_secret(secret):
+                raise HTTPException(status_code=401, detail="Invalid Elara service token")
+            # Update last_used_at (fire-and-forget)
+            try:
+                await db.elara_service_tokens.update_one(
+                    {"_id": token_doc["_id"]},
+                    {"$set": {"last_used_at": datetime.now(timezone.utc).isoformat()}}
+                )
+            except Exception:
+                pass
+            tenant = await db.tenants.find_one({"_id": token_doc["tenant_id"]})
+            return {
+                "user_id": token_doc.get("created_by_user_id", ""),
+                "tenant_id": token_doc["tenant_id"],
+                "role": token_doc.get("role", "user"),
+                "plan": (tenant or {}).get("plan", "starter"),
+                "email": "",
+                "name": (tenant or {}).get("name", ""),
+                "auth_method": "service_token",
+                "token_id": token_id,
+                "scopes": token_doc.get("scopes", ["*"]),
+            }
+    # Fall back to regular session auth
+    ctx = await get_tenant_context(request)
+    ctx["auth_method"] = "session"
+    return ctx
+
+
+# ─── Service token management endpoints ──────────────────────────────────────
+
+class ElaraTokenCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    scopes: List[str] = Field(default_factory=lambda: ["*"])
+    expires_in_days: Optional[int] = Field(default=None, ge=1, le=3650)
+
+
+@api_router.post("/elara/tokens")
+async def elara_mint_token(data: ElaraTokenCreate, ctx=Depends(get_tenant_context)):
+    """Mint a new per-tenant Elara service token. Plaintext is returned ONCE."""
+    # Only the tenant owner or an admin may mint
+    tenant = await db.tenants.find_one({"_id": ctx["tenant_id"]})
+    if ctx["user_id"] != (tenant or {}).get("owner_user_id") and ctx["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Only tenant owner or admin can mint Elara tokens")
+    token_id, secret, full_token = _mint_service_token_value()
+    expires_at = ""
+    if data.expires_in_days:
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=data.expires_in_days)).isoformat()
+    doc = {
+        "_id": str(uuid.uuid4()),
+        "token_id": token_id,
+        "tenant_id": ctx["tenant_id"],
+        "name": data.name.strip(),
+        "scopes": data.scopes or ["*"],
+        "secret_hash": _hash_secret(secret),
+        "created_by_user_id": ctx["user_id"],
+        "role": "user",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "last_used_at": "",
+        "expires_at": expires_at,
+        "revoked_at": "",
+    }
+    await db.elara_service_tokens.insert_one(doc)
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "elara.token.mint",
+                    inputs={"name": data.name, "scopes": data.scopes}, status="ok")
+    return {
+        "id": doc["_id"],
+        "token_id": token_id,
+        "name": doc["name"],
+        "scopes": doc["scopes"],
+        "token": full_token,  # ONLY returned on mint — store it now
+        "created_at": doc["created_at"],
+        "expires_at": expires_at,
+        "warning": "This is the only time the token will be shown. Copy it to Replit Secrets now.",
+    }
+
+
+@api_router.get("/elara/tokens")
+async def elara_list_tokens(ctx=Depends(get_tenant_context)):
+    """List Elara service tokens for the current tenant (no secrets returned)."""
+    tokens = []
+    async for t in db.elara_service_tokens.find({"tenant_id": ctx["tenant_id"]}).sort("created_at", -1):
+        tokens.append({
+            "id": t["_id"],
+            "token_id": t["token_id"],
+            "name": t.get("name", ""),
+            "scopes": t.get("scopes", []),
+            "prefix": f"{ELARA_TOKEN_PREFIX}{t['token_id']}.****",
+            "created_at": t.get("created_at", ""),
+            "created_by_user_id": t.get("created_by_user_id", ""),
+            "last_used_at": t.get("last_used_at", ""),
+            "expires_at": t.get("expires_at", ""),
+            "revoked_at": t.get("revoked_at", ""),
+            "revoked": bool(t.get("revoked_at")),
+        })
+    return {"tokens": tokens, "count": len(tokens)}
+
+
+@api_router.delete("/elara/tokens/{token_id}")
+async def elara_revoke_token(token_id: str, ctx=Depends(get_tenant_context)):
+    """Revoke an Elara service token (tenant-scoped)."""
+    tenant = await db.tenants.find_one({"_id": ctx["tenant_id"]})
+    if ctx["user_id"] != (tenant or {}).get("owner_user_id") and ctx["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Only tenant owner or admin can revoke Elara tokens")
+    res = await db.elara_service_tokens.update_one(
+        {"_id": token_id, "tenant_id": ctx["tenant_id"], "revoked_at": {"$in": [None, ""]}},
+        {"$set": {"revoked_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Token not found or already revoked")
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "elara.token.revoke",
+                    inputs={"token_id": token_id}, status="ok")
+    return {"revoked": True, "token_id": token_id}
+
+
+# ─── Tool discovery (so Elara/CrewAI can introspect what's available) ────────
+
+@api_router.get("/elara/tools")
+async def elara_list_tools(ctx=Depends(get_elara_caller)):
+    """Lists every tool surface available to Elara. Used by CrewAI tools and the
+    Integrations Hub in the dashboard. Includes JSON-schema-lite arg hints."""
+    tools = [
+        {"name": "contacts.search",  "method": "GET",   "path": "/api/elara/tools/contacts/search",
+         "args": {"q": "str", "limit": "int=20", "smart_list": "str?"}},
+        {"name": "contacts.get",     "method": "GET",   "path": "/api/elara/tools/contacts/{id}", "args": {}},
+        {"name": "contacts.create",  "method": "POST",  "path": "/api/elara/tools/contacts",
+         "args": {"name": "str", "email": "str?", "phone": "str?", "tags": "list?"}},
+        {"name": "contacts.update",  "method": "PATCH", "path": "/api/elara/tools/contacts/{id}", "args": {"any field": "..."}},
+        {"name": "contacts.sms",     "method": "POST",  "path": "/api/elara/tools/contacts/{id}/sms", "args": {"body": "str"}},
+        {"name": "contacts.email",   "method": "POST",  "path": "/api/elara/tools/contacts/{id}/email",
+         "args": {"subject": "str", "body": "str", "is_html": "bool=false"}},
+        {"name": "contacts.note",    "method": "POST",  "path": "/api/elara/tools/contacts/{id}/note", "args": {"body": "str"}},
+        {"name": "contacts.timeline","method": "GET",   "path": "/api/elara/tools/contacts/{id}/timeline", "args": {"limit": "int=50"}},
+        {"name": "tasks.create",     "method": "POST",  "path": "/api/elara/tools/tasks",
+         "args": {"title": "str", "contact_id": "str?", "due_at": "iso8601?", "task_type": "str?", "priority": "str?"}},
+        {"name": "tasks.complete",   "method": "POST",  "path": "/api/elara/tools/tasks/{id}/complete", "args": {}},
+        {"name": "tasks.today",      "method": "GET",   "path": "/api/elara/tools/tasks/today", "args": {}},
+        {"name": "inbox.unread",     "method": "GET",   "path": "/api/elara/tools/inbox/unread", "args": {}},
+        {"name": "inbox.recent",     "method": "GET",   "path": "/api/elara/tools/inbox/recent", "args": {"limit": "int=20"}},
+        {"name": "calendar.today",   "method": "GET",   "path": "/api/elara/tools/calendar/today", "args": {}},
+        {"name": "deals.list",       "method": "GET",   "path": "/api/elara/tools/deals", "args": {"stage": "str?", "limit": "int=50"}},
+        {"name": "memory.write",     "method": "POST",  "path": "/api/elara/tools/memory",
+         "args": {"kind": "note|entity|pattern|preference", "key": "str", "value": "str",
+                  "visibility": "private|shared", "tags": "list?"}},
+        {"name": "memory.search",    "method": "GET",   "path": "/api/elara/tools/memory/search",
+         "args": {"q": "str", "kind": "str?", "limit": "int=20"}},
+        {"name": "activity.log",     "method": "POST",  "path": "/api/elara/tools/activity",
+         "args": {"activity_type": "str", "description": "str", "contact_id": "str?"}},
+        {"name": "llm.chat",         "method": "POST",  "path": "/api/elara/llm/v1/chat/completions",
+         "args": "OpenAI ChatCompletions format"},
+    ]
+    return {
+        "tenant_id": ctx["tenant_id"],
+        "plan": ctx["plan"],
+        "auth_method": ctx["auth_method"],
+        "tools": tools,
+        "count": len(tools),
+    }
+
+
+# ─── Contact tools ────────────────────────────────────────────────────────────
+
+def _public_contact(c: dict) -> dict:
+    """Sanitize a contact doc for Elara output."""
+    if not c:
+        return {}
+    return {
+        "id": str(c.get("_id", c.get("id", ""))),
+        "name": c.get("name", ""),
+        "email": c.get("email", ""),
+        "phone": c.get("phone", ""),
+        "stage": c.get("stage", ""),
+        "source": c.get("source", ""),
+        "tags": c.get("tags", []),
+        "notes": c.get("notes", ""),
+        "score": c.get("score"),
+        "move_in_date": c.get("move_in_date", ""),
+        "desired_rent": c.get("desired_rent"),
+        "assigned_to": c.get("assigned_to", ""),
+        "last_contacted": c.get("last_contacted", ""),
+        "created_at": c.get("created_at", ""),
+    }
+
+
+@api_router.get("/elara/tools/contacts/search")
+async def elara_tool_contacts_search(
+    q: str = "", limit: int = 20, smart_list: Optional[str] = None,
+    ctx=Depends(get_elara_caller),
+):
+    """Search contacts within the tenant by name/email/phone/tags. Returns list."""
+    limit = max(1, min(int(limit or 20), 100))
+    base = {"tenant_id": ctx["tenant_id"]}
+    if q:
+        rx = {"$regex": re.escape(q.strip()), "$options": "i"}
+        base["$or"] = [{"name": rx}, {"email": rx}, {"phone": rx}, {"tags": rx}, {"notes": rx}]
+    if smart_list:
+        base["tags"] = {"$regex": re.escape(smart_list), "$options": "i"}
+    cur = db.contacts.find(base).limit(limit).sort("created_at", -1)
+    items = [_public_contact(c) for c in await cur.to_list(limit)]
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "contacts.search",
+                    inputs={"q": q, "limit": limit, "smart_list": smart_list},
+                    outputs={"count": len(items)}, status="ok")
+    return {"items": items, "count": len(items), "query": q}
+
+
+@api_router.get("/elara/tools/contacts/{contact_id}")
+async def elara_tool_contacts_get(contact_id: str, ctx=Depends(get_elara_caller)):
+    """Get one contact by id, tenant-scoped. 404 if not in tenant."""
+    try:
+        oid = ObjectId(contact_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid contact id")
+    c = await db.contacts.find_one({"_id": oid, "tenant_id": ctx["tenant_id"]})
+    if not c:
+        await audit_log(ctx["tenant_id"], ctx["user_id"], "contacts.get",
+                        inputs={"contact_id": contact_id}, status="not_found")
+        raise HTTPException(status_code=404, detail="Contact not found in this tenant")
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "contacts.get",
+                    inputs={"contact_id": contact_id}, status="ok")
+    return _public_contact(c)
+
+
+class ElaraContactCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    email: Optional[str] = Field(default=None, max_length=200)
+    phone: Optional[str] = Field(default=None, max_length=40)
+    tags: Optional[List[str]] = Field(default_factory=list)
+    notes: Optional[str] = Field(default="", max_length=4000)
+    source: Optional[str] = Field(default="elara")
+    move_in_date: Optional[str] = Field(default=None)
+    desired_rent: Optional[float] = Field(default=None, ge=0)
+
+
+@api_router.post("/elara/tools/contacts")
+async def elara_tool_contacts_create(data: ElaraContactCreate, ctx=Depends(get_elara_caller)):
+    """Create a contact under this tenant. Returns the new contact."""
+    doc = data.model_dump(exclude_unset=True)
+    doc["tenant_id"] = ctx["tenant_id"]
+    doc["user_id"] = ctx["user_id"] or ctx["tenant_id"]
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    doc["created_by_elara"] = True
+    res = await db.contacts.insert_one(doc)
+    contact_id = str(res.inserted_id)
+    doc["_id"] = res.inserted_id
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "contacts.create",
+                    inputs={"name": data.name}, outputs={"contact_id": contact_id}, status="ok")
+    return _public_contact(doc)
+
+
+class ElaraContactUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=200)
+    email: Optional[str] = Field(default=None, max_length=200)
+    phone: Optional[str] = Field(default=None, max_length=40)
+    tags: Optional[List[str]] = None
+    notes: Optional[str] = Field(default=None, max_length=4000)
+    stage: Optional[str] = None
+    source: Optional[str] = None
+    move_in_date: Optional[str] = None
+    desired_rent: Optional[float] = Field(default=None, ge=0)
+    score: Optional[int] = Field(default=None, ge=0, le=100)
+
+
+@api_router.patch("/elara/tools/contacts/{contact_id}")
+async def elara_tool_contacts_update(contact_id: str, data: ElaraContactUpdate, ctx=Depends(get_elara_caller)):
+    """Patch a contact (tenant-scoped)."""
+    try:
+        oid = ObjectId(contact_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid contact id")
+    update = {k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None}
+    if not update:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    update["updated_at"] = datetime.now(timezone.utc).isoformat()
+    update["updated_by_elara"] = True
+    res = await db.contacts.update_one({"_id": oid, "tenant_id": ctx["tenant_id"]}, {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Contact not found in this tenant")
+    c = await db.contacts.find_one({"_id": oid, "tenant_id": ctx["tenant_id"]})
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "contacts.update",
+                    inputs={"contact_id": contact_id, "fields": list(update.keys())}, status="ok")
+    return _public_contact(c)
+
+
+# ─── Communication tools (SMS, Email, Notes) ──────────────────────────────────
+
+class ElaraSMSSend(BaseModel):
+    body: str = Field(..., min_length=1, max_length=1600)
+
+
+@api_router.post("/elara/tools/contacts/{contact_id}/sms")
+async def elara_tool_contact_sms(contact_id: str, data: ElaraSMSSend, ctx=Depends(get_elara_caller)):
+    """Send an SMS to a contact via Twilio. Logs to inbox + activity."""
+    try:
+        oid = ObjectId(contact_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid contact id")
+    c = await db.contacts.find_one({"_id": oid, "tenant_id": ctx["tenant_id"]})
+    if not c:
+        raise HTTPException(status_code=404, detail="Contact not found in this tenant")
+    to_phone = (c.get("phone") or "").strip()
+    if not to_phone:
+        raise HTTPException(status_code=400, detail="Contact has no phone number")
+    external_id = ""
+    twilio_error = ""
+    if settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN and settings.TWILIO_PHONE_NUMBER:
+        try:
+            from twilio.rest import Client as _TwClient
+            def _send():
+                return _TwClient(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN).messages.create(
+                    body=data.body, from_=settings.TWILIO_PHONE_NUMBER, to=to_phone,
+                )
+            msg = await asyncio.to_thread(_send)
+            external_id = msg.sid
+        except Exception as e:
+            twilio_error = str(e)[:300]
+            logger.warning(f"Elara SMS send to {to_phone} failed: {twilio_error}")
+    else:
+        twilio_error = "Twilio not configured"
+    # Always log the message locally (graceful degradation)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.messages.insert_one({
+        "tenant_id": ctx["tenant_id"],
+        "user_id": ctx["user_id"] or ctx["tenant_id"],
+        "contact_id": str(c["_id"]),
+        "channel": "sms",
+        "direction": "outbound",
+        "subject": "",
+        "body": data.body,
+        "from_addr": settings.TWILIO_PHONE_NUMBER,
+        "to_addr": to_phone,
+        "external_id": external_id,
+        "sent_by_elara": True,
+        "send_error": twilio_error,
+        "read": True,
+        "created_at": now_iso,
+    })
+    await db.activities.insert_one({
+        "tenant_id": ctx["tenant_id"],
+        "user_id": ctx["user_id"] or ctx["tenant_id"],
+        "contact_id": str(c["_id"]),
+        "activity_type": "sms",
+        "description": f"Elara sent SMS: {data.body[:80]}",
+        "created_at": now_iso,
+    })
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "contacts.sms",
+                    inputs={"contact_id": contact_id, "body_len": len(data.body)},
+                    outputs={"external_id": external_id, "delivered_to_twilio": bool(external_id)},
+                    status="ok" if external_id else "degraded", error=twilio_error)
+    return {
+        "sent": bool(external_id),
+        "external_id": external_id,
+        "degraded": not external_id,
+        "error": twilio_error,
+    }
+
+
+class ElaraEmailSend(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=200)
+    body: str = Field(..., min_length=1, max_length=50000)
+    is_html: bool = False
+
+
+@api_router.post("/elara/tools/contacts/{contact_id}/email")
+async def elara_tool_contact_email(contact_id: str, data: ElaraEmailSend, ctx=Depends(get_elara_caller)):
+    """Send an email to a contact via Brevo. Logs locally; degrades if Brevo unset."""
+    try:
+        oid = ObjectId(contact_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid contact id")
+    c = await db.contacts.find_one({"_id": oid, "tenant_id": ctx["tenant_id"]})
+    if not c:
+        raise HTTPException(status_code=404, detail="Contact not found in this tenant")
+    to_email = (c.get("email") or "").strip()
+    if not to_email:
+        raise HTTPException(status_code=400, detail="Contact has no email address")
+    external_id = ""
+    err = ""
+    if settings.BREVO_API_KEY:
+        try:
+            import aiohttp
+            payload = {
+                "sender": {"email": settings.SENDER_EMAIL or "noreply@propflow.local",
+                           "name": settings.SENDER_NAME or "PropFlow"},
+                "to": [{"email": to_email, "name": c.get("name", "")}],
+                "subject": data.subject,
+                ("htmlContent" if data.is_html else "textContent"): data.body,
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "https://api.brevo.com/v3/smtp/email",
+                    headers={"api-key": settings.BREVO_API_KEY, "content-type": "application/json"},
+                    json=payload, timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    body = await resp.json()
+                    if resp.status in (200, 201, 202):
+                        external_id = body.get("messageId", "")
+                    else:
+                        err = f"Brevo {resp.status}: {body}"
+        except Exception as e:
+            err = str(e)[:300]
+    else:
+        err = "Brevo not configured (BREVO_API_KEY missing)"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.messages.insert_one({
+        "tenant_id": ctx["tenant_id"],
+        "user_id": ctx["user_id"] or ctx["tenant_id"],
+        "contact_id": str(c["_id"]),
+        "channel": "email",
+        "direction": "outbound",
+        "subject": data.subject,
+        "body": data.body,
+        "from_addr": settings.SENDER_EMAIL,
+        "to_addr": to_email,
+        "external_id": external_id,
+        "sent_by_elara": True,
+        "send_error": err,
+        "read": True,
+        "created_at": now_iso,
+    })
+    await db.activities.insert_one({
+        "tenant_id": ctx["tenant_id"],
+        "user_id": ctx["user_id"] or ctx["tenant_id"],
+        "contact_id": str(c["_id"]),
+        "activity_type": "email",
+        "description": f"Elara sent email: {data.subject[:80]}",
+        "created_at": now_iso,
+    })
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "contacts.email",
+                    inputs={"contact_id": contact_id, "subject": data.subject},
+                    outputs={"external_id": external_id},
+                    status="ok" if external_id else "degraded", error=err)
+    return {"sent": bool(external_id), "external_id": external_id, "degraded": not external_id, "error": err}
+
+
+class ElaraNote(BaseModel):
+    body: str = Field(..., min_length=1, max_length=4000)
+
+
+@api_router.post("/elara/tools/contacts/{contact_id}/note")
+async def elara_tool_contact_note(contact_id: str, data: ElaraNote, ctx=Depends(get_elara_caller)):
+    """Add a note to a contact (logged as activity_type=note)."""
+    try:
+        oid = ObjectId(contact_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid contact id")
+    c = await db.contacts.find_one({"_id": oid, "tenant_id": ctx["tenant_id"]})
+    if not c:
+        raise HTTPException(status_code=404, detail="Contact not found in this tenant")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    activity_doc = {
+        "tenant_id": ctx["tenant_id"],
+        "user_id": ctx["user_id"] or ctx["tenant_id"],
+        "contact_id": str(c["_id"]),
+        "activity_type": "note",
+        "description": data.body,
+        "created_by_elara": True,
+        "created_at": now_iso,
+    }
+    res = await db.activities.insert_one(activity_doc)
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "contacts.note",
+                    inputs={"contact_id": contact_id, "body_len": len(data.body)},
+                    outputs={"activity_id": str(res.inserted_id)}, status="ok")
+    return {"id": str(res.inserted_id), "created_at": now_iso}
+
+
+@api_router.get("/elara/tools/contacts/{contact_id}/timeline")
+async def elara_tool_contact_timeline(contact_id: str, limit: int = 50, ctx=Depends(get_elara_caller)):
+    """Combined activities + messages for a contact, newest first."""
+    limit = max(1, min(int(limit or 50), 200))
+    base = {"contact_id": contact_id, "tenant_id": ctx["tenant_id"]}
+    activities = await db.activities.find(base).sort("created_at", -1).limit(limit).to_list(limit)
+    messages = await db.messages.find(base).sort("created_at", -1).limit(limit).to_list(limit)
+    combined = []
+    for a in activities:
+        combined.append({
+            "kind": "activity",
+            "id": str(a.get("_id", "")),
+            "type": a.get("activity_type", ""),
+            "description": a.get("description", ""),
+            "by_elara": a.get("created_by_elara", False),
+            "created_at": a.get("created_at", ""),
+        })
+    for m in messages:
+        combined.append({
+            "kind": "message",
+            "id": str(m.get("_id", "")),
+            "channel": m.get("channel", ""),
+            "direction": m.get("direction", ""),
+            "subject": m.get("subject", ""),
+            "body": m.get("body", "")[:500],
+            "by_elara": m.get("sent_by_elara", False),
+            "created_at": m.get("created_at", ""),
+        })
+    combined.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    combined = combined[:limit]
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "contacts.timeline",
+                    inputs={"contact_id": contact_id, "limit": limit},
+                    outputs={"count": len(combined)}, status="ok")
+    return {"items": combined, "count": len(combined)}
+
+
+# ─── Task tools ───────────────────────────────────────────────────────────────
+
+class ElaraTaskCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=300)
+    contact_id: Optional[str] = None
+    due_at: Optional[str] = None
+    task_type: Optional[str] = "other"
+    priority: Optional[str] = "normal"
+    notes: Optional[str] = Field(default="", max_length=2000)
+
+
+@api_router.post("/elara/tools/tasks")
+async def elara_tool_tasks_create(data: ElaraTaskCreate, ctx=Depends(get_elara_caller)):
+    """Create a task assigned to the caller (tenant-scoped)."""
+    doc = data.model_dump(exclude_unset=True)
+    doc["tenant_id"] = ctx["tenant_id"]
+    doc["user_id"] = ctx["user_id"] or ctx["tenant_id"]
+    doc["status"] = "pending"
+    doc["created_by_elara"] = True
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    res = await db.tasks.insert_one(doc)
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "tasks.create",
+                    inputs={"title": data.title, "contact_id": data.contact_id},
+                    outputs={"task_id": str(res.inserted_id)}, status="ok")
+    return {
+        "id": str(res.inserted_id),
+        "title": data.title,
+        "due_at": data.due_at or "",
+        "task_type": data.task_type,
+        "priority": data.priority,
+        "status": "pending",
+        "created_at": doc["created_at"],
+    }
+
+
+@api_router.post("/elara/tools/tasks/{task_id}/complete")
+async def elara_tool_tasks_complete(task_id: str, ctx=Depends(get_elara_caller)):
+    """Mark a task complete (tenant-scoped)."""
+    try:
+        oid = ObjectId(task_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid task id")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    res = await db.tasks.update_one(
+        {"_id": oid, "tenant_id": ctx["tenant_id"]},
+        {"$set": {"status": "completed", "completed_at": now_iso,
+                  "completed_by_elara": True}}
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Task not found in this tenant")
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "tasks.complete",
+                    inputs={"task_id": task_id}, status="ok")
+    return {"completed": True, "task_id": task_id, "completed_at": now_iso}
+
+
+@api_router.get("/elara/tools/tasks/today")
+async def elara_tool_tasks_today(ctx=Depends(get_elara_caller)):
+    """Tasks due today + overdue, tenant-scoped."""
+    today_end = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59).isoformat()
+    q = {
+        "tenant_id": ctx["tenant_id"],
+        "status": {"$nin": ["completed", "cancelled"]},
+        "due_at": {"$lte": today_end},
+    }
+    items = []
+    async for t in db.tasks.find(q).sort("due_at", 1).limit(100):
+        items.append({
+            "id": str(t["_id"]),
+            "title": t.get("title", ""),
+            "task_type": t.get("task_type", "other"),
+            "priority": t.get("priority", "normal"),
+            "due_at": t.get("due_at", ""),
+            "contact_id": t.get("contact_id", ""),
+            "status": t.get("status", "pending"),
+        })
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "tasks.today",
+                    outputs={"count": len(items)}, status="ok")
+    return {"items": items, "count": len(items)}
+
+
+# ─── Inbox tools ──────────────────────────────────────────────────────────────
+
+@api_router.get("/elara/tools/inbox/unread")
+async def elara_tool_inbox_unread(ctx=Depends(get_elara_caller)):
+    """Unread message count + a few preview threads (tenant-scoped)."""
+    base = {"tenant_id": ctx["tenant_id"], "direction": "inbound", "read": False}
+    unread_count = await db.messages.count_documents(base)
+    preview = []
+    async for m in db.messages.find(base).sort("created_at", -1).limit(10):
+        preview.append({
+            "id": str(m.get("_id", "")),
+            "contact_id": m.get("contact_id", ""),
+            "channel": m.get("channel", ""),
+            "subject": m.get("subject", ""),
+            "body_preview": (m.get("body", "") or "")[:160],
+            "from_addr": m.get("from_addr", ""),
+            "created_at": m.get("created_at", ""),
+        })
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "inbox.unread",
+                    outputs={"unread_count": unread_count}, status="ok")
+    return {"unread_count": unread_count, "preview": preview}
+
+
+@api_router.get("/elara/tools/inbox/recent")
+async def elara_tool_inbox_recent(limit: int = 20, ctx=Depends(get_elara_caller)):
+    """Recent threads in the unified inbox (tenant-scoped)."""
+    limit = max(1, min(int(limit or 20), 100))
+    threads = []
+    async for t in db.inbox_threads.find({"tenant_id": ctx["tenant_id"]}).sort("last_message_at", -1).limit(limit):
+        threads.append({
+            "contact_id": t.get("contact_id", ""),
+            "last_message_at": t.get("last_message_at", ""),
+            "last_channel": t.get("last_channel", ""),
+            "unread_count": t.get("unread_count", 0),
+        })
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "inbox.recent",
+                    outputs={"count": len(threads)}, status="ok")
+    return {"items": threads, "count": len(threads)}
+
+
+# ─── Calendar tools ───────────────────────────────────────────────────────────
+
+@api_router.get("/elara/tools/calendar/today")
+async def elara_tool_calendar_today(ctx=Depends(get_elara_caller)):
+    """Today's calendar events (tenant-scoped)."""
+    now = datetime.now(timezone.utc)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    end = now.replace(hour=23, minute=59, second=59, microsecond=0).isoformat()
+    q = {"tenant_id": ctx["tenant_id"],
+         "start_at": {"$gte": start, "$lte": end}}
+    items = []
+    async for e in db.calendar_events.find(q).sort("start_at", 1).limit(100):
+        items.append({
+            "id": str(e["_id"]),
+            "title": e.get("title", ""),
+            "start_at": e.get("start_at", ""),
+            "end_at": e.get("end_at", ""),
+            "contact_id": e.get("contact_id", ""),
+            "location": e.get("location", ""),
+            "event_type": e.get("event_type", ""),
+        })
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "calendar.today",
+                    outputs={"count": len(items)}, status="ok")
+    return {"items": items, "count": len(items)}
+
+
+# ─── Deal tools ───────────────────────────────────────────────────────────────
+
+@api_router.get("/elara/tools/deals")
+async def elara_tool_deals_list(stage: Optional[str] = None, limit: int = 50, ctx=Depends(get_elara_caller)):
+    """List deals in this tenant, optionally filtered by stage."""
+    limit = max(1, min(int(limit or 50), 200))
+    q = {"tenant_id": ctx["tenant_id"]}
+    if stage:
+        q["stage"] = stage
+    items = []
+    async for d in db.deals.find(q).sort("created_at", -1).limit(limit):
+        items.append({
+            "id": str(d["_id"]),
+            "title": d.get("title", ""),
+            "contact_id": d.get("contact_id", ""),
+            "stage": d.get("stage", ""),
+            "value": d.get("value"),
+            "desired_rent": d.get("desired_rent"),
+            "property_id": d.get("property_id", ""),
+            "created_at": d.get("created_at", ""),
+        })
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "deals.list",
+                    inputs={"stage": stage, "limit": limit},
+                    outputs={"count": len(items)}, status="ok")
+    return {"items": items, "count": len(items)}
+
+
+# ─── Memory tools (long-term Elara memory) ────────────────────────────────────
+
+class ElaraMemoryWrite(BaseModel):
+    kind: str = Field(..., max_length=40)          # note | entity | pattern | preference
+    key: str = Field(..., min_length=1, max_length=200)
+    value: str = Field(..., min_length=1, max_length=20000)
+    visibility: str = Field(default="private", max_length=20)  # private | shared
+    tags: Optional[List[str]] = Field(default_factory=list)
+    contact_id: Optional[str] = None
+
+    @field_validator("kind")
+    @classmethod
+    def _v_kind(cls, v):
+        if v not in {"note", "entity", "pattern", "preference", "fact", "task_context"}:
+            raise ValueError("kind must be note/entity/pattern/preference/fact/task_context")
+        return v
+
+    @field_validator("visibility")
+    @classmethod
+    def _v_vis(cls, v):
+        if v not in {"private", "shared"}:
+            raise ValueError("visibility must be private or shared")
+        return v
+
+
+@api_router.post("/elara/tools/memory")
+async def elara_tool_memory_write(data: ElaraMemoryWrite, ctx=Depends(get_elara_caller)):
+    """Write a memory entry. private=this user only; shared=all users in tenant."""
+    new_id = str(uuid.uuid4())
+    doc = {
+        "tenant_id": ctx["tenant_id"],
+        "user_id": ctx["user_id"] or ctx["tenant_id"],
+        "kind": data.kind,
+        "key": data.key,
+        "value": data.value,
+        "visibility": data.visibility,
+        "tags": data.tags or [],
+        "contact_id": data.contact_id or "",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    # Upsert by (tenant_id, user_id, kind, key) for de-dup
+    # Use $setOnInsert for _id to avoid modifying immutable field on update
+    await db.elara_memory.update_one(
+        {"tenant_id": ctx["tenant_id"], "user_id": doc["user_id"],
+         "kind": data.kind, "key": data.key},
+        {"$set": doc, "$setOnInsert": {"_id": new_id}}, upsert=True,
+    )
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "memory.write",
+                    inputs={"kind": data.kind, "key": data.key, "visibility": data.visibility},
+                    status="ok")
+    return {"saved": True, "id": new_id, "kind": data.kind, "key": data.key}
+
+
+@api_router.get("/elara/tools/memory/search")
+async def elara_tool_memory_search(q: str = "", kind: Optional[str] = None, limit: int = 20,
+                                   ctx=Depends(get_elara_caller)):
+    """Search memory within tenant. Private memory is filtered by user_id; shared
+    is visible to all users in the tenant."""
+    limit = max(1, min(int(limit or 20), 100))
+    base = {
+        "tenant_id": ctx["tenant_id"],
+        "$or": [
+            {"visibility": "shared"},
+            {"visibility": "private", "user_id": ctx["user_id"] or ctx["tenant_id"]},
+        ],
+    }
+    if kind:
+        base["kind"] = kind
+    if q:
+        rx = {"$regex": re.escape(q.strip()), "$options": "i"}
+        base["$and"] = [{"$or": [{"key": rx}, {"value": rx}, {"tags": rx}]}]
+    items = []
+    async for m in db.elara_memory.find(base).sort("created_at", -1).limit(limit):
+        items.append({
+            "id": m["_id"],
+            "kind": m.get("kind", ""),
+            "key": m.get("key", ""),
+            "value": m.get("value", ""),
+            "visibility": m.get("visibility", "private"),
+            "tags": m.get("tags", []),
+            "contact_id": m.get("contact_id", ""),
+            "created_at": m.get("created_at", ""),
+        })
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "memory.search",
+                    inputs={"q": q, "kind": kind, "limit": limit},
+                    outputs={"count": len(items)}, status="ok")
+    return {"items": items, "count": len(items)}
+
+
+# ─── Activity log tool ────────────────────────────────────────────────────────
+
+class ElaraActivityLog(BaseModel):
+    activity_type: str = Field(..., max_length=40)
+    description: str = Field(..., min_length=1, max_length=2000)
+    contact_id: Optional[str] = None
+
+
+@api_router.post("/elara/tools/activity")
+async def elara_tool_activity_log(data: ElaraActivityLog, ctx=Depends(get_elara_caller)):
+    """Log an Elara activity (visible in the Activity feed)."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "_id": str(uuid.uuid4()),
+        "tenant_id": ctx["tenant_id"],
+        "user_id": ctx["user_id"] or ctx["tenant_id"],
+        "kind": "elara_action",
+        "activity_type": data.activity_type,
+        "description": data.description,
+        "contact_id": data.contact_id or "",
+        "created_at": now_iso,
+    }
+    await db.elara_activity.insert_one(doc)
+    # Also mirror into the user-facing activities feed if contact present
+    if data.contact_id:
+        await db.activities.insert_one({
+            "tenant_id": ctx["tenant_id"],
+            "user_id": ctx["user_id"] or ctx["tenant_id"],
+            "contact_id": data.contact_id,
+            "activity_type": data.activity_type,
+            "description": f"[Elara] {data.description}",
+            "created_at": now_iso,
+        })
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "activity.log",
+                    inputs={"activity_type": data.activity_type}, status="ok")
+    return {"id": doc["_id"], "created_at": now_iso}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ELARA LLM PROXY — OpenAI-compatible chat completions endpoint
+# Translates incoming OpenAI-format requests into emergentintegrations.LlmChat
+# calls so CrewAI/LiteLLM on Replit can use the Emergent Universal LLM Key
+# transparently. Non-streaming for Phase 1; streaming planned for Phase 2.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@api_router.post("/elara/llm/v1/chat/completions")
+async def elara_llm_chat_completions(payload: dict, ctx=Depends(get_elara_caller)):
+    """OpenAI-compatible chat completions proxy backed by emergentintegrations.
+    Accepts standard OpenAI ChatCompletions request body. Returns OpenAI-format
+    response. Streaming (`stream:true`) is not yet supported and falls back to
+    non-streaming."""
+    if not settings.EMERGENT_LLM_KEY:
+        raise HTTPException(status_code=500, detail="EMERGENT_LLM_KEY not configured on PropFlow")
+    messages = payload.get("messages") or []
+    if not messages or not isinstance(messages, list):
+        raise HTTPException(status_code=400, detail="`messages` array required")
+    model_str = payload.get("model", "gpt-5.4")
+    provider, model = _elara_resolve_model(model_str)
+
+    # Extract system + flatten conversation into a single user message containing
+    # the rolling history (emergentintegrations.LlmChat is single-shot per call)
+    system_parts: List[str] = []
+    convo_lines: List[str] = []
+    last_user = ""
+    for m in messages:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if isinstance(content, list):
+            content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+        content = str(content or "")
+        if role == "system":
+            system_parts.append(content)
+        elif role == "user":
+            last_user = content
+            convo_lines.append(f"User: {content}")
+        elif role == "assistant":
+            convo_lines.append(f"Assistant: {content}")
+        elif role == "tool":
+            convo_lines.append(f"Tool[{m.get('name','?')}]: {content}")
+
+    system_msg = "\n\n".join([p for p in system_parts if p]) or "You are Elara, a helpful B2B automation co-pilot."
+    if len(convo_lines) > 1:
+        # Inject prior history into the system message
+        prior = "\n".join(convo_lines[:-1])
+        system_msg = f"{system_msg}\n\n---\nPrior conversation history:\n{prior}\n---"
+
+    session_id = payload.get("user") or f"elara-{ctx['tenant_id']}-{uuid.uuid4().hex[:8]}"
+    started = datetime.now(timezone.utc)
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        chat = LlmChat(
+            api_key=settings.EMERGENT_LLM_KEY,
+            session_id=session_id,
+            system_message=system_msg,
+        ).with_model(provider, model)
+        result_text = await chat.send_message(UserMessage(text=last_user or ""))
+    except Exception as e:
+        logger.error(f"Elara LLM proxy error ({provider}/{model}): {e}")
+        await audit_log(ctx["tenant_id"], ctx["user_id"], "llm.chat",
+                        inputs={"model": f"{provider}/{model}", "msgs": len(messages)},
+                        status="error", error=str(e)[:300])
+        raise HTTPException(status_code=502, detail=f"Upstream LLM error: {str(e)[:200]}")
+    finished = datetime.now(timezone.utc)
+
+    # Rough token accounting (4 chars ≈ 1 token)
+    prompt_chars = sum(len(m.get("content", "")) for m in messages if isinstance(m.get("content"), str))
+    prompt_tokens = max(1, prompt_chars // 4)
+    completion_tokens = max(1, len(result_text or "") // 4)
+
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "llm.chat",
+                    inputs={"model": f"{provider}/{model}", "msgs": len(messages),
+                            "prompt_chars": prompt_chars},
+                    outputs={"completion_chars": len(result_text or ""),
+                             "duration_ms": int((finished - started).total_seconds() * 1000)},
+                    status="ok")
+
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+        "object": "chat.completion",
+        "created": int(finished.timestamp()),
+        "model": f"{provider}/{model}",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": result_text or ""},
+            "finish_reason": "stop",
+        }],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+        "_propflow": {
+            "tenant_id": ctx["tenant_id"],
+            "auth_method": ctx["auth_method"],
+            "duration_ms": int((finished - started).total_seconds() * 1000),
+        },
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# END PHASE 1 — ELARA BRIDGE
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 app.include_router(api_router)
