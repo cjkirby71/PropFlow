@@ -4,6 +4,7 @@ Phase 0 Multi-Tenancy Foundation Testing
 Tests all 12 steps from the review request
 """
 
+import os
 import requests
 import jwt
 import json
@@ -11,7 +12,7 @@ from datetime import datetime
 
 # Configuration
 BASE_URL = "https://student-rental-hub-2.preview.emergentagent.com/api"
-JWT_SECRET = "a9f3c7e81b2d4f5a6e8c0d1b3f5a7e9c2d4b6a8e0f1c3d5b7a9e1f3c5d7b9a1"
+JWT_SECRET = os.environ.get("JWT_SECRET", "test-secret-please-set-env")
 JWT_ALGORITHM = "HS256"
 
 # Admin credentials
