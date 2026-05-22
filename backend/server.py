@@ -7228,16 +7228,16 @@ async def elara_tool_activity_log(data: ElaraActivityLog, ctx=Depends(get_elara_
 @api_router.post("/elara/llm/v1/chat/completions")
 async def elara_llm_chat_completions(payload: dict, ctx=Depends(get_elara_caller)):
     """OpenAI-compatible chat completions proxy backed by emergentintegrations.
-    Accepts standard OpenAI ChatCompletions request body. Returns OpenAI-format
-    response. Streaming (`stream:true`) is not yet supported and falls back to
-    non-streaming."""
+    Accepts standard OpenAI ChatCompletions request body. Supports `stream:true`
+    via Server-Sent Events (chunked output)."""
     if not settings.EMERGENT_LLM_KEY:
         raise HTTPException(status_code=500, detail="EMERGENT_LLM_KEY not configured on PropFlow")
     messages = payload.get("messages") or []
     if not messages or not isinstance(messages, list):
         raise HTTPException(status_code=400, detail="`messages` array required")
-    model_str = payload.get("model", "gpt-5.4")
+    model_str = payload.get("model", "gpt-5.2")
     provider, model = _elara_resolve_model(model_str)
+    stream = bool(payload.get("stream", False))
 
     # Extract system + flatten conversation into a single user message containing
     # the rolling history (emergentintegrations.LlmChat is single-shot per call)
@@ -7262,42 +7262,44 @@ async def elara_llm_chat_completions(payload: dict, ctx=Depends(get_elara_caller
 
     system_msg = "\n\n".join([p for p in system_parts if p]) or "You are Elara, a helpful B2B automation co-pilot."
     if len(convo_lines) > 1:
-        # Inject prior history into the system message
         prior = "\n".join(convo_lines[:-1])
         system_msg = f"{system_msg}\n\n---\nPrior conversation history:\n{prior}\n---"
 
     session_id = payload.get("user") or f"elara-{ctx['tenant_id']}-{uuid.uuid4().hex[:8]}"
     started = datetime.now(timezone.utc)
     try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-        chat = LlmChat(
-            api_key=settings.EMERGENT_LLM_KEY,
-            session_id=session_id,
-            system_message=system_msg,
-        ).with_model(provider, model)
-        result_text = await chat.send_message(UserMessage(text=last_user or ""))
+        result_text = await _run_llm(provider, model, system_msg, last_user, session_id)
     except Exception as e:
         logger.error(f"Elara LLM proxy error ({provider}/{model}): {e}")
         await audit_log(ctx["tenant_id"], ctx["user_id"], "llm.chat",
                         inputs={"model": f"{provider}/{model}", "msgs": len(messages)},
                         status="error", error=str(e)[:300])
+        if stream:
+            return _sse_error_stream(str(e)[:200])
         raise HTTPException(status_code=502, detail=f"Upstream LLM error: {str(e)[:200]}")
     finished = datetime.now(timezone.utc)
 
-    # Rough token accounting (4 chars ≈ 1 token)
     prompt_chars = sum(len(m.get("content", "")) for m in messages if isinstance(m.get("content"), str))
     prompt_tokens = max(1, prompt_chars // 4)
     completion_tokens = max(1, len(result_text or "") // 4)
 
     await audit_log(ctx["tenant_id"], ctx["user_id"], "llm.chat",
                     inputs={"model": f"{provider}/{model}", "msgs": len(messages),
-                            "prompt_chars": prompt_chars},
+                            "prompt_chars": prompt_chars, "stream": stream},
                     outputs={"completion_chars": len(result_text or ""),
                              "duration_ms": int((finished - started).total_seconds() * 1000)},
                     status="ok")
 
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+    if stream:
+        return StreamingResponse(
+            _sse_chat_completion_chunks(completion_id, f"{provider}/{model}", result_text or ""),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     return {
-        "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+        "id": completion_id,
         "object": "chat.completion",
         "created": int(finished.timestamp()),
         "model": f"{provider}/{model}",
@@ -7317,6 +7319,435 @@ async def elara_llm_chat_completions(payload: dict, ctx=Depends(get_elara_caller
             "duration_ms": int((finished - started).total_seconds() * 1000),
         },
     }
+
+
+# ─── LLM execution + SSE helpers ──────────────────────────────────────────────
+
+async def _run_llm(provider: str, model: str, system_msg: str, user_msg: str, session_id: str) -> str:
+    """Single-shot call to emergentintegrations.LlmChat. Returns plain string."""
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    chat = LlmChat(
+        api_key=settings.EMERGENT_LLM_KEY,
+        session_id=session_id,
+        system_message=system_msg,
+    ).with_model(provider, model)
+    result = await chat.send_message(UserMessage(text=user_msg or ""))
+    return result or ""
+
+
+async def _sse_chat_completion_chunks(completion_id: str, model: str, full_text: str):
+    """Yields OpenAI-format SSE events for a chat completion. We don't have real
+    upstream streaming, so we chunk the full response into small word-groups
+    with a small delay for a smooth typing effect."""
+    created = int(datetime.now(timezone.utc).timestamp())
+    # First chunk: role
+    first = {
+        "id": completion_id, "object": "chat.completion.chunk", "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+    }
+    yield f"data: {json.dumps(first)}\n\n"
+    # Body chunks: chunk by word groups (~3-5 words) with small delays
+    if full_text:
+        tokens = full_text.split(" ")
+        i = 0
+        while i < len(tokens):
+            group = tokens[i:i+3]
+            chunk_text = (" " if i > 0 else "") + " ".join(group)
+            payload = {
+                "id": completion_id, "object": "chat.completion.chunk",
+                "created": created, "model": model,
+                "choices": [{"index": 0, "delta": {"content": chunk_text}, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(payload)}\n\n"
+            i += 3
+            await asyncio.sleep(0.03)  # ~30ms per chunk = ~10 chunks/sec
+    # Final chunk: finish_reason
+    last = {
+        "id": completion_id, "object": "chat.completion.chunk", "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    }
+    yield f"data: {json.dumps(last)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+async def _sse_error_stream(err_msg: str):
+    """Used when streaming was requested but upstream failed — emit one error event."""
+    err = {"error": {"message": err_msg, "type": "upstream_error"}}
+    async def _gen():
+        yield f"data: {json.dumps(err)}\n\n"
+        yield "data: [DONE]\n\n"
+    return StreamingResponse(_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache"})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ELARA CONVERSATIONS & HIGH-LEVEL CHAT  (Phase 2)
+# Persists conversations and messages in elara_conversations + elara_messages.
+# /api/elara/chat is the high-level endpoint the UI uses (vs the low-level
+# /v1/chat/completions used by CrewAI on Replit).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+ELARA_DEFAULT_SYSTEM = """You are Elara, a friendly, action-oriented Second Brain for B2B real-estate and automation professionals.
+
+Personality:
+- Calm, sharp, slightly playful — like a brilliant chief-of-staff.
+- You give crisp, useful answers. No filler. No "Certainly!" "Of course!" preamble.
+- When you don't know, you say so plainly.
+- When the user is vague, you ask one clarifying question max.
+
+What you do:
+- Help with real-estate leasing, investor relations, sales/lead generation, B2B automation.
+- Draft messages (SMS/email/notes) when asked. Default tone: warm, professional, concise.
+- Summarize contacts, deals, threads, calendars when asked.
+- Suggest next-best-actions backed by reasoning.
+
+Privacy:
+- You are operating exclusively within ONE tenant. You have no knowledge of other tenants or users.
+- Never invent data not present in the user's context.
+"""
+
+
+async def _build_chat_system_msg(ctx: dict, context: Optional[dict]) -> str:
+    """Build the full system message for /api/elara/chat including user/tenant
+    info and current-page context (e.g., the contact being viewed)."""
+    parts = [ELARA_DEFAULT_SYSTEM]
+    parts.append(f"\nCurrent user: {ctx.get('name') or ctx.get('email') or 'unknown'} "
+                 f"(tenant: {ctx.get('tenant_name') or ctx.get('tenant_id')}, plan: {ctx.get('plan', 'starter')})")
+    parts.append(f"Today's date: {datetime.now(timezone.utc).strftime('%A, %B %d, %Y')}")
+    context = context or {}
+    if context.get("page"):
+        parts.append(f"\nUser is currently viewing: {context['page']}")
+    contact_id = context.get("contact_id")
+    if contact_id:
+        try:
+            oid = ObjectId(contact_id)
+            c = await db.contacts.find_one({"_id": oid, "tenant_id": ctx["tenant_id"]})
+            if c:
+                parts.append(
+                    f"\nThe contact they're viewing:\n"
+                    f"  Name: {c.get('name', 'Unknown')}\n"
+                    f"  Email: {c.get('email', '—')}\n"
+                    f"  Phone: {c.get('phone', '—')}\n"
+                    f"  Stage: {c.get('stage', '—')}\n"
+                    f"  Source: {c.get('source', '—')}\n"
+                    f"  Tags: {', '.join(c.get('tags') or []) or '—'}\n"
+                    f"  Move-in date: {c.get('move_in_date', '—')}\n"
+                    f"  Notes: {(c.get('notes') or '—')[:300]}"
+                )
+        except Exception:
+            pass
+    # Pull a few recent shared memories as long-term context
+    try:
+        mems = await db.elara_memory.find({
+            "tenant_id": ctx["tenant_id"],
+            "$or": [{"visibility": "shared"},
+                    {"visibility": "private", "user_id": ctx["user_id"]}],
+        }).sort("created_at", -1).limit(8).to_list(8)
+        if mems:
+            mem_lines = [f"  - [{m.get('kind','?')}] {m.get('key','')}: {m.get('value','')[:200]}" for m in mems]
+            parts.append("\nRelevant long-term memory:\n" + "\n".join(mem_lines))
+    except Exception:
+        pass
+    return "\n".join(parts)
+
+
+class ElaraConversationCreate(BaseModel):
+    title: Optional[str] = Field(default="New conversation", max_length=200)
+    context: Optional[dict] = None
+
+
+@api_router.post("/elara/conversations")
+async def elara_conv_create(data: ElaraConversationCreate, ctx=Depends(get_elara_caller)):
+    """Create a new conversation (per-user within tenant)."""
+    doc = {
+        "_id": str(uuid.uuid4()),
+        "tenant_id": ctx["tenant_id"],
+        "user_id": ctx["user_id"] or ctx["tenant_id"],
+        "title": (data.title or "New conversation").strip()[:200],
+        "context": data.context or {},
+        "archived": False,
+        "message_count": 0,
+        "last_message_at": "",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.elara_conversations.insert_one(doc)
+    return doc
+
+
+@api_router.get("/elara/conversations")
+async def elara_conv_list(limit: int = 50, archived: bool = False, ctx=Depends(get_elara_caller)):
+    """List conversations for the current user, newest first."""
+    limit = max(1, min(int(limit or 50), 200))
+    q = {
+        "tenant_id": ctx["tenant_id"],
+        "user_id": ctx["user_id"] or ctx["tenant_id"],
+        "archived": bool(archived),
+    }
+    items = []
+    async for c in db.elara_conversations.find(q).sort("updated_at", -1).limit(limit):
+        items.append({
+            "id": c["_id"], "title": c.get("title", ""),
+            "message_count": c.get("message_count", 0),
+            "last_message_at": c.get("last_message_at", ""),
+            "created_at": c.get("created_at", ""),
+            "updated_at": c.get("updated_at", ""),
+            "context": c.get("context", {}),
+            "archived": c.get("archived", False),
+        })
+    return {"items": items, "count": len(items)}
+
+
+@api_router.get("/elara/conversations/{conv_id}")
+async def elara_conv_get(conv_id: str, ctx=Depends(get_elara_caller)):
+    """Fetch a conversation + its messages (in order)."""
+    conv = await db.elara_conversations.find_one({
+        "_id": conv_id, "tenant_id": ctx["tenant_id"],
+        "user_id": ctx["user_id"] or ctx["tenant_id"],
+    })
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found in this tenant")
+    messages = []
+    async for m in db.elara_messages.find({"conversation_id": conv_id,
+                                           "tenant_id": ctx["tenant_id"]}).sort("created_at", 1):
+        messages.append({
+            "id": m.get("_id", ""),
+            "role": m.get("role", "user"),
+            "content": m.get("content", ""),
+            "created_at": m.get("created_at", ""),
+        })
+    return {
+        "id": conv["_id"], "title": conv.get("title", ""),
+        "context": conv.get("context", {}),
+        "message_count": conv.get("message_count", 0),
+        "created_at": conv.get("created_at", ""),
+        "updated_at": conv.get("updated_at", ""),
+        "messages": messages,
+    }
+
+
+class ElaraConversationUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=200)
+    archived: Optional[bool] = None
+
+
+@api_router.patch("/elara/conversations/{conv_id}")
+async def elara_conv_update(conv_id: str, data: ElaraConversationUpdate, ctx=Depends(get_elara_caller)):
+    update = {k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None}
+    if not update:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    update["updated_at"] = datetime.now(timezone.utc).isoformat()
+    res = await db.elara_conversations.update_one(
+        {"_id": conv_id, "tenant_id": ctx["tenant_id"],
+         "user_id": ctx["user_id"] or ctx["tenant_id"]},
+        {"$set": update},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Conversation not found in this tenant")
+    return {"updated": True, "id": conv_id}
+
+
+@api_router.delete("/elara/conversations/{conv_id}")
+async def elara_conv_delete(conv_id: str, ctx=Depends(get_elara_caller)):
+    res = await db.elara_conversations.delete_one({
+        "_id": conv_id, "tenant_id": ctx["tenant_id"],
+        "user_id": ctx["user_id"] or ctx["tenant_id"],
+    })
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Conversation not found in this tenant")
+    await db.elara_messages.delete_many({"conversation_id": conv_id, "tenant_id": ctx["tenant_id"]})
+    return {"deleted": True, "id": conv_id}
+
+
+class ElaraChatSend(BaseModel):
+    conversation_id: Optional[str] = None        # auto-creates if missing
+    message: str = Field(..., min_length=1, max_length=10000)
+    model: Optional[str] = "gpt-5.2"
+    context: Optional[dict] = None               # {page, contact_id, ...}
+    stream: bool = True
+
+
+@api_router.post("/elara/chat")
+async def elara_chat(data: ElaraChatSend, ctx=Depends(get_elara_caller)):
+    """High-level chat endpoint used by the floating drawer and /elara page.
+    Persists turns to elara_messages, calls the LLM, supports SSE streaming."""
+    user_id_eff = ctx["user_id"] or ctx["tenant_id"]
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # 1) Resolve / create conversation
+    if data.conversation_id:
+        conv = await db.elara_conversations.find_one({
+            "_id": data.conversation_id, "tenant_id": ctx["tenant_id"],
+            "user_id": user_id_eff,
+        })
+        if not conv:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+    else:
+        conv_id = str(uuid.uuid4())
+        title = (data.message[:60] + ("…" if len(data.message) > 60 else "")).strip() or "New conversation"
+        conv = {
+            "_id": conv_id, "tenant_id": ctx["tenant_id"], "user_id": user_id_eff,
+            "title": title, "context": data.context or {}, "archived": False,
+            "message_count": 0, "last_message_at": "",
+            "created_at": now_iso, "updated_at": now_iso,
+        }
+        await db.elara_conversations.insert_one(conv)
+
+    conv_id = conv["_id"]
+
+    # 2) Persist the user message
+    user_msg_id = str(uuid.uuid4())
+    await db.elara_messages.insert_one({
+        "_id": user_msg_id, "conversation_id": conv_id,
+        "tenant_id": ctx["tenant_id"], "user_id": user_id_eff,
+        "role": "user", "content": data.message,
+        "created_at": now_iso,
+    })
+
+    # 3) Pull conversation history (last 16 turns) for context
+    history = await db.elara_messages.find({
+        "conversation_id": conv_id, "tenant_id": ctx["tenant_id"],
+    }).sort("created_at", -1).limit(16).to_list(16)
+    history = list(reversed(history))
+
+    # 4) Build system message (Elara persona + context + memory)
+    system_msg = await _build_chat_system_msg(ctx, data.context or conv.get("context"))
+    convo_lines = []
+    for m in history[:-1]:  # exclude the just-added user message; it's the prompt
+        if m.get("role") == "user":
+            convo_lines.append(f"User: {m.get('content','')}")
+        elif m.get("role") == "assistant":
+            convo_lines.append(f"Assistant: {m.get('content','')}")
+    if convo_lines:
+        system_msg += "\n\n---\nPrior conversation:\n" + "\n".join(convo_lines) + "\n---"
+
+    provider, model = _elara_resolve_model(data.model or "gpt-5.2")
+    session_id = f"elara-{ctx['tenant_id']}-{conv_id}"
+    started = datetime.now(timezone.utc)
+
+    # 5) Call the LLM
+    try:
+        result_text = await _run_llm(provider, model, system_msg, data.message, session_id)
+    except Exception as e:
+        logger.error(f"Elara chat LLM error: {e}")
+        await audit_log(ctx["tenant_id"], ctx["user_id"], "chat.send",
+                        inputs={"conversation_id": conv_id, "model": f"{provider}/{model}"},
+                        status="error", error=str(e)[:300])
+        # Persist a friendly error message so the conversation history shows it
+        err_text = "I hit an upstream LLM error — please try again in a moment."
+        await db.elara_messages.insert_one({
+            "_id": str(uuid.uuid4()), "conversation_id": conv_id,
+            "tenant_id": ctx["tenant_id"], "user_id": user_id_eff,
+            "role": "assistant", "content": err_text,
+            "error": True, "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        if data.stream:
+            return _sse_error_stream(str(e)[:200])
+        raise HTTPException(status_code=502, detail=f"Upstream LLM error: {str(e)[:200]}")
+
+    finished = datetime.now(timezone.utc)
+
+    # 6) Persist the assistant response
+    asst_msg_id = str(uuid.uuid4())
+    asst_iso = finished.isoformat()
+    await db.elara_messages.insert_one({
+        "_id": asst_msg_id, "conversation_id": conv_id,
+        "tenant_id": ctx["tenant_id"], "user_id": user_id_eff,
+        "role": "assistant", "content": result_text or "",
+        "model": f"{provider}/{model}",
+        "duration_ms": int((finished - started).total_seconds() * 1000),
+        "created_at": asst_iso,
+    })
+
+    # 7) Bump conversation meta
+    await db.elara_conversations.update_one(
+        {"_id": conv_id, "tenant_id": ctx["tenant_id"]},
+        {"$set": {"last_message_at": asst_iso, "updated_at": asst_iso},
+         "$inc": {"message_count": 2}},
+    )
+
+    # 8) Activity feed + audit
+    await db.elara_activity.insert_one({
+        "_id": str(uuid.uuid4()), "tenant_id": ctx["tenant_id"], "user_id": user_id_eff,
+        "kind": "chat", "activity_type": "chat.exchange",
+        "description": f"User: {data.message[:80]}",
+        "conversation_id": conv_id, "created_at": asst_iso,
+    })
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "chat.send",
+                    inputs={"conversation_id": conv_id, "model": f"{provider}/{model}",
+                            "prompt_chars": len(data.message)},
+                    outputs={"completion_chars": len(result_text or ""),
+                             "duration_ms": int((finished - started).total_seconds() * 1000)},
+                    status="ok")
+
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+
+    if data.stream:
+        async def _gen():
+            # First emit a metadata frame the UI can use to pin the conversation_id
+            meta = {"_propflow": {"conversation_id": conv_id,
+                                  "user_msg_id": user_msg_id,
+                                  "assistant_msg_id": asst_msg_id,
+                                  "model": f"{provider}/{model}"}}
+            yield f"data: {json.dumps(meta)}\n\n"
+            async for chunk in _sse_chat_completion_chunks(completion_id, f"{provider}/{model}", result_text or ""):
+                yield chunk
+        return StreamingResponse(_gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    return {
+        "conversation_id": conv_id,
+        "user_message": {"id": user_msg_id, "role": "user", "content": data.message, "created_at": now_iso},
+        "assistant_message": {"id": asst_msg_id, "role": "assistant", "content": result_text or "",
+                              "model": f"{provider}/{model}", "created_at": asst_iso},
+    }
+
+
+@api_router.get("/elara/briefing")
+async def elara_briefing(ctx=Depends(get_elara_caller)):
+    """Today's briefing — used as the welcome card on /elara when no conversation
+    is selected. Pulls tasks-today + unread inbox + a friendly LLM intro."""
+    today_end = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59).isoformat()
+    tasks_count = await db.tasks.count_documents({
+        "tenant_id": ctx["tenant_id"],
+        "status": {"$nin": ["completed", "cancelled"]},
+        "due_at": {"$lte": today_end},
+    })
+    unread = await db.messages.count_documents({
+        "tenant_id": ctx["tenant_id"], "direction": "inbound", "read": False,
+    })
+    contacts_total = await db.contacts.count_documents({"tenant_id": ctx["tenant_id"]})
+    deals_open = await db.deals.count_documents({
+        "tenant_id": ctx["tenant_id"], "stage": {"$nin": ["closed_won", "closed_lost"]},
+    })
+    today_label = datetime.now(timezone.utc).strftime("%A, %B %d")
+    user_label = ctx.get("name") or (ctx.get("email") or "").split("@")[0] or "there"
+    greeting = (
+        f"Good day, {user_label}. Here's your {today_label} at a glance: "
+        f"{tasks_count} task{'s' if tasks_count != 1 else ''} due, "
+        f"{unread} unread message{'s' if unread != 1 else ''}, "
+        f"{deals_open} open deal{'s' if deals_open != 1 else ''}, "
+        f"{contacts_total} total contact{'s' if contacts_total != 1 else ''}. "
+        f"What would you like to tackle first?"
+    )
+    return {
+        "greeting": greeting,
+        "stats": {
+            "tasks_due_today": tasks_count,
+            "unread_messages": unread,
+            "open_deals": deals_open,
+            "total_contacts": contacts_total,
+        },
+        "user": {"name": user_label, "email": ctx.get("email", "")},
+        "tenant": {"id": ctx["tenant_id"], "name": ctx.get("tenant_name", ""), "plan": ctx.get("plan", "starter")},
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# END PHASE 2 CONVERSATIONS / CHAT
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
