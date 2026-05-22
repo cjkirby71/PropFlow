@@ -6363,7 +6363,7 @@ ELARA_LLM_AVAILABLE_MODELS = {
     "gemini": {"gemini-3.1-pro-preview", "gemini-3-flash-preview",
                "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"},
 }
-ELARA_DEFAULT_MODEL = ("openai", "gpt-5.4")
+ELARA_DEFAULT_MODEL = ("openai", "gpt-5.2")
 
 
 def _elara_resolve_model(model: str) -> Tuple[str, str]:
