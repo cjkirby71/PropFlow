@@ -4,6 +4,7 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import { queryClient } from './hooks/queryClient';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ThemeProvider } from './contexts/ThemeContext';
+import { ElaraProvider } from './contexts/ElaraContext';
 import ErrorBoundary from './components/ErrorBoundary';
 import Layout from './components/Layout';
 import LoginPage from './pages/LoginPage';
@@ -20,6 +21,7 @@ import SettingsPage from './pages/SettingsPage';
 import SequencesPage from './pages/SequencesPage';
 import AnalyticsPage from './pages/AnalyticsPage';
 import InboxPage from './pages/InboxPage';
+import ElaraPage from './pages/ElaraPage';
 import { Toaster } from './components/ui/sonner';
 
 function ProtectedRoute({ children }) {
@@ -49,28 +51,31 @@ function App() {
       <ThemeProvider>
         <QueryClientProvider client={queryClient}>
           <AuthProvider>
-            <BrowserRouter>
-              <Routes>
-                <Route path="/login" element={<PublicRoute><LoginPage /></PublicRoute>} />
-                <Route path="/register" element={<PublicRoute><RegisterPage /></PublicRoute>} />
-                <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-                  <Route index element={<DashboardPage />} />
-                  <Route path="contacts" element={<ContactsPage />} />
-                  <Route path="contacts/:id" element={<ContactDetailPage />} />
-                  <Route path="inbox" element={<InboxPage />} />
-                  <Route path="pipeline" element={<PipelinePage />} />
-                  <Route path="properties" element={<PropertiesPage />} />
-                  <Route path="tasks" element={<TasksPage />} />
-                  <Route path="sequences" element={<SequencesPage />} />
-                  <Route path="analytics" element={<AnalyticsPage />} />
-                  <Route path="calendar" element={<CalendarPage />} />
-                  <Route path="templates" element={<TemplatesPage />} />
-                  <Route path="settings" element={<SettingsPage />} />
-                </Route>
-                <Route path="*" element={<Navigate to="/" replace />} />
-              </Routes>
-            </BrowserRouter>
-            <Toaster />
+            <ElaraProvider>
+              <BrowserRouter>
+                <Routes>
+                  <Route path="/login" element={<PublicRoute><LoginPage /></PublicRoute>} />
+                  <Route path="/register" element={<PublicRoute><RegisterPage /></PublicRoute>} />
+                  <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
+                    <Route index element={<DashboardPage />} />
+                    <Route path="contacts" element={<ContactsPage />} />
+                    <Route path="contacts/:id" element={<ContactDetailPage />} />
+                    <Route path="inbox" element={<InboxPage />} />
+                    <Route path="pipeline" element={<PipelinePage />} />
+                    <Route path="properties" element={<PropertiesPage />} />
+                    <Route path="tasks" element={<TasksPage />} />
+                    <Route path="sequences" element={<SequencesPage />} />
+                    <Route path="analytics" element={<AnalyticsPage />} />
+                    <Route path="calendar" element={<CalendarPage />} />
+                    <Route path="templates" element={<TemplatesPage />} />
+                    <Route path="settings" element={<SettingsPage />} />
+                    <Route path="elara" element={<ElaraPage />} />
+                  </Route>
+                  <Route path="*" element={<Navigate to="/" replace />} />
+                </Routes>
+              </BrowserRouter>
+              <Toaster />
+            </ElaraProvider>
           </AuthProvider>
         </QueryClientProvider>
       </ThemeProvider>

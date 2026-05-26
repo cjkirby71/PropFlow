@@ -11,7 +11,7 @@ import json
 from datetime import datetime
 
 # Configuration
-BASE_URL = "https://student-rental-hub-2.preview.emergentagent.com/api"
+BASE_URL = "https://propflow-crm-4.preview.emergentagent.com/api"
 JWT_SECRET = os.environ.get("JWT_SECRET", "test-secret-please-set-env")
 JWT_ALGORITHM = "HS256"
 

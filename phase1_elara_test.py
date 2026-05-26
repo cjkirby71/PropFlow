@@ -17,7 +17,7 @@ import json
 from datetime import datetime, timedelta
 
 # Configuration
-BASE_URL = "https://student-rental-hub-2.preview.emergentagent.com/api"
+BASE_URL = "https://propflow-crm-4.preview.emergentagent.com/api"
 
 # Admin credentials
 ADMIN_EMAIL = "admin@propflow.com"

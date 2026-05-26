@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
+import { useElaraUI } from '../contexts/ElaraContext';
+import ElaraDrawer from './ElaraDrawer';
 import {
   LayoutDashboard, Users, Building2, Kanban, CheckSquare, Settings, LogOut, Menu, X, Sparkles, Search, CalendarDays, FileText, TrendingUp, Zap, Moon, Sun, Command, Inbox as InboxIcon
 } from 'lucide-react';
@@ -20,6 +22,7 @@ const navItems = [
   { to: '/analytics', icon: TrendingUp, label: 'Analytics' },
   { to: '/calendar', icon: CalendarDays, label: 'Calendar' },
   { to: '/templates', icon: FileText, label: 'Templates' },
+  { to: '/elara', icon: Sparkles, label: 'Elara' },
   { to: '/settings', icon: Settings, label: 'Settings' },
 ];
 
@@ -33,6 +36,7 @@ const mobileNavItems = [
 export default function Layout() {
   const { user, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
+  const { openDrawer } = useElaraUI();
   const navigate = useNavigate();
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -222,11 +226,13 @@ export default function Layout() {
               <Button
                 variant="ghost"
                 size="sm"
+                onClick={() => openDrawer()}
                 className="gap-1.5 h-9 rounded-lg bg-gradient-to-br from-amber-50 to-amber-100 dark:from-amber-900/20 dark:to-amber-900/10 text-amber-700 dark:text-amber-300 hover:from-amber-100 hover:to-amber-200 dark:hover:from-amber-900/30 dark:hover:to-amber-900/20 hover:shadow-sm border border-amber-200/60 dark:border-amber-700/40"
                 data-testid="ai-assistant-button"
+                title="Ask Elara"
               >
                 <Sparkles className="w-4 h-4" />
-                <span className="hidden sm:inline text-sm font-semibold">AI</span>
+                <span className="hidden sm:inline text-sm font-semibold">Ask Elara</span>
               </Button>
             </div>
           </header>
@@ -261,6 +267,8 @@ export default function Layout() {
             </div>
           </nav>
         </div>
+        {/* Floating Elara drawer (global, only inside auth'd layout) */}
+        <ElaraDrawer />
       </div>
     </TooltipProvider>
   );

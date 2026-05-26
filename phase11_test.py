@@ -12,7 +12,7 @@ import random
 from datetime import datetime, timezone, timedelta
 
 # Configuration
-BASE_URL = "https://student-rental-hub-2.preview.emergentagent.com/api"
+BASE_URL = "https://propflow-crm-4.preview.emergentagent.com/api"
 TEST_EMAIL = "admin@propflow.com"
 TEST_PASSWORD = "admin123"
 

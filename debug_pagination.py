@@ -7,7 +7,7 @@ import asyncio
 import aiohttp
 import json
 
-BASE_URL = "https://student-rental-hub-2.preview.emergentagent.com/api"
+BASE_URL = "https://propflow-crm-4.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@propflow.com"
 ADMIN_PASSWORD = "admin123"
 

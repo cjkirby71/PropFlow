@@ -28,6 +28,7 @@ import { Badge } from '../components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from '../components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { Checkbox } from '../components/ui/checkbox';
+import ElaraServiceTokensCard from '../components/ElaraServiceTokensCard';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TABS
@@ -621,6 +622,9 @@ function IntegrationsTab() {
   return (
     <div className="space-y-4" data-testid="integrations-tab">
       <BrokerageSheetCard />
+
+      {/* Elara Service Tokens — for external CrewAI / agent integrations */}
+      <ElaraServiceTokensCard />
 
       {/* Third-party status */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
