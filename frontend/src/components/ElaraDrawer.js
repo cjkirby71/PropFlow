@@ -169,32 +169,36 @@ export default function ElaraDrawer() {
                 </div>
               ) : (
                 conversations.map((c) => (
-                  <button
+                  <div
                     key={c.id}
-                    onClick={() => handleSelectConv(c.id)}
-                    className={`group w-full text-left p-2.5 rounded-lg border transition flex items-start gap-2 ${
+                    className={`group w-full text-left rounded-lg border transition flex items-start gap-2 ${
                       activeConversationId === c.id
                         ? 'bg-brand/10 dark:bg-brand/20 border-brand/40'
                         : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700/60 hover:border-brand/30 hover:bg-slate-50 dark:hover:bg-slate-700/40'
                     }`}
                     data-testid={`elara-conv-item-${c.id}`}
                   >
-                    <MessageSquare className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500 flex-shrink-0 mt-1" />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-[12.5px] font-semibold text-slate-800 dark:text-slate-100 truncate">{c.title || 'Untitled'}</p>
-                      <p className="text-[10.5px] text-slate-500 dark:text-slate-400 truncate">
-                        {c.message_count || 0} message{c.message_count === 1 ? '' : 's'}
-                        {c.updated_at ? ` · ${formatRelative(c.updated_at)}` : ''}
-                      </p>
-                    </div>
+                    <button
+                      onClick={() => handleSelectConv(c.id)}
+                      className="flex-1 min-w-0 flex items-start gap-2 p-2.5 text-left"
+                    >
+                      <MessageSquare className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500 flex-shrink-0 mt-1" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[12.5px] font-semibold text-slate-800 dark:text-slate-100 truncate">{c.title || 'Untitled'}</p>
+                        <p className="text-[10.5px] text-slate-500 dark:text-slate-400 truncate">
+                          {c.message_count || 0} message{c.message_count === 1 ? '' : 's'}
+                          {c.updated_at ? ` · ${formatRelative(c.updated_at)}` : ''}
+                        </p>
+                      </div>
+                    </button>
                     <button
                       onClick={(e) => handleDelete(e, c.id)}
-                      className="opacity-0 group-hover:opacity-100 transition text-slate-400 hover:text-rose-500 flex-shrink-0 mt-0.5"
+                      className="opacity-0 group-hover:opacity-100 transition text-slate-400 hover:text-rose-500 flex-shrink-0 p-2.5"
                       title="Delete"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
-                  </button>
+                  </div>
                 ))
               )}
             </div>
