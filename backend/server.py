@@ -6231,6 +6231,8 @@ async def twilio_inbound_sms(request: Request):
 class TenantUpdate(BaseModel):
     name: Optional[str] = Field(default=None, max_length=200)
     plan: Optional[str] = Field(default=None, max_length=20)
+    industry: Optional[str] = Field(default=None, max_length=60)
+    use_cases: Optional[List[str]] = Field(default=None)
 
     @field_validator("plan")
     @classmethod
@@ -6238,6 +6240,25 @@ class TenantUpdate(BaseModel):
         if v is not None and v not in VALID_PLANS:
             raise ValueError(f"plan must be one of: {', '.join(VALID_PLANS)}")
         return v
+
+    @field_validator("industry")
+    @classmethod
+    def validate_industry(cls, v):
+        if v is None:
+            return v
+        allowed = ("real_estate_leasing", "investor_acquisitions", "b2b_automation", "general")
+        if v not in allowed:
+            raise ValueError(f"industry must be one of: {', '.join(allowed)}")
+        return v
+
+    @field_validator("use_cases")
+    @classmethod
+    def validate_use_cases(cls, v):
+        if v is None:
+            return v
+        if not isinstance(v, list):
+            raise ValueError("use_cases must be a list of strings")
+        return [str(x)[:60] for x in v][:20]
 
 
 @api_router.get("/tenants/me")
@@ -6254,6 +6275,8 @@ async def tenants_me(ctx=Depends(get_tenant_context)):
         "tenant_id": ctx["tenant_id"],
         "name": tenant.get("name", ""),
         "plan": tenant.get("plan", "starter"),
+        "industry": tenant.get("industry", ""),
+        "use_cases": tenant.get("use_cases", []),
         "owner_user_id": tenant.get("owner_user_id", ""),
         "members": tenant.get("members", []),
         "member_count": member_count,
@@ -6565,6 +6588,10 @@ async def elara_list_tools(ctx=Depends(get_elara_caller)):
          "args": {"q": "str", "kind": "str?", "limit": "int=20"}},
         {"name": "activity.log",     "method": "POST",  "path": "/api/elara/tools/activity",
          "args": {"activity_type": "str", "description": "str", "contact_id": "str?"}},
+        {"name": "pending_actions.create", "method": "POST", "path": "/api/elara/tools/pending_actions/create",
+         "args": {"kind": "send_sms|send_email|create_task|add_note|update_contact|create_deal|generic",
+                  "summary": "str", "payload": "dict", "target_contact_id": "str?",
+                  "rationale": "str?", "expires_at": "iso8601?"}},
         {"name": "llm.chat",         "method": "POST",  "path": "/api/elara/llm/v1/chat/completions",
          "args": "OpenAI ChatCompletions format"},
     ]
@@ -7707,42 +7734,861 @@ async def elara_chat(data: ElaraChatSend, ctx=Depends(get_elara_caller)):
 
 @api_router.get("/elara/briefing")
 async def elara_briefing(ctx=Depends(get_elara_caller)):
-    """Today's briefing — used as the welcome card on /elara when no conversation
-    is selected. Pulls tasks-today + unread inbox + a friendly LLM intro."""
-    today_end = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59).isoformat()
-    tasks_count = await db.tasks.count_documents({
-        "tenant_id": ctx["tenant_id"],
+    """Phase 3 enhanced daily briefing — powers the command-center landing on /elara.
+    Returns: greeting, today's KPIs (tasks/inbox/deals/contacts), top 3 priorities,
+    open deals $ value, time-of-day-aware mood, plus tenant context."""
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = now.replace(hour=23, minute=59, second=59, microsecond=999000)
+    today_start_iso = today_start.isoformat()
+    today_end_iso = today_end.isoformat()
+
+    tenant_id = ctx["tenant_id"]
+    user_id = ctx["user_id"]
+
+    # Tasks: due today (incl overdue still open) + overdue separately
+    tasks_due_today = await db.tasks.count_documents({
+        "tenant_id": tenant_id,
         "status": {"$nin": ["completed", "cancelled"]},
-        "due_at": {"$lte": today_end},
+        "due_at": {"$gte": today_start_iso, "$lte": today_end_iso},
     })
+    tasks_overdue = await db.tasks.count_documents({
+        "tenant_id": tenant_id,
+        "status": {"$nin": ["completed", "cancelled"]},
+        "due_at": {"$lt": today_start_iso, "$ne": ""},
+    })
+    tasks_completed_today = await db.tasks.count_documents({
+        "tenant_id": tenant_id,
+        "status": "completed",
+        "completed_at": {"$gte": today_start_iso, "$lte": today_end_iso},
+    })
+
+    # Inbox unread
     unread = await db.messages.count_documents({
-        "tenant_id": ctx["tenant_id"], "direction": "inbound", "read": False,
+        "tenant_id": tenant_id, "direction": "inbound", "read": False,
     })
-    contacts_total = await db.contacts.count_documents({"tenant_id": ctx["tenant_id"]})
-    deals_open = await db.deals.count_documents({
-        "tenant_id": ctx["tenant_id"], "stage": {"$nin": ["closed_won", "closed_lost"]},
+
+    # Deals: open + value
+    deals_pipeline = [
+        {"$match": {
+            "tenant_id": tenant_id,
+            "stage": {"$nin": ["closed_won", "closed_lost", "Lost", "Move-In"]},
+        }},
+        {"$group": {
+            "_id": None,
+            "count": {"$sum": 1},
+            "value": {"$sum": {"$ifNull": ["$value", 0]}},
+        }},
+    ]
+    deals_open = 0
+    deals_open_value = 0.0
+    async for row in db.deals.aggregate(deals_pipeline):
+        deals_open = int(row.get("count", 0))
+        deals_open_value = float(row.get("value", 0) or 0)
+        break
+
+    # Contacts: total + stale (no activity in 14d)
+    contacts_total = await db.contacts.count_documents({"tenant_id": tenant_id})
+    stale_cutoff = (now - timedelta(days=14)).isoformat()
+    contacts_stale = await db.contacts.count_documents({
+        "tenant_id": tenant_id,
+        "$or": [
+            {"last_activity_at": {"$lt": stale_cutoff}},
+            {"last_activity_at": {"$exists": False}},
+            {"last_activity_at": ""},
+        ],
     })
-    today_label = datetime.now(timezone.utc).strftime("%A, %B %d")
+
+    # Pending approvals queue depth
+    approvals_pending = await db.elara_pending_actions.count_documents({
+        "tenant_id": tenant_id,
+        "status": "pending",
+    })
+
+    # Top 3 priorities — heuristic: overdue first, then high-priority tasks due today,
+    # then medium-priority tasks due today
+    priorities = []
+    async for t in db.tasks.find({
+        "tenant_id": tenant_id,
+        "status": {"$nin": ["completed", "cancelled"]},
+        "due_at": {"$lt": today_start_iso, "$ne": ""},
+    }).sort("due_at", 1).limit(3):
+        priorities.append({
+            "type": "task_overdue",
+            "id": str(t.get("_id", "")),
+            "title": t.get("title", "Untitled task"),
+            "priority": t.get("priority", "medium"),
+            "due_at": t.get("due_at", ""),
+            "contact_id": t.get("contact_id", ""),
+        })
+    if len(priorities) < 3:
+        remaining = 3 - len(priorities)
+        async for t in db.tasks.find({
+            "tenant_id": tenant_id,
+            "status": {"$nin": ["completed", "cancelled"]},
+            "due_at": {"$gte": today_start_iso, "$lte": today_end_iso},
+        }).sort([("priority", -1), ("due_at", 1)]).limit(remaining):
+            priorities.append({
+                "type": "task_today",
+                "id": str(t.get("_id", "")),
+                "title": t.get("title", "Untitled task"),
+                "priority": t.get("priority", "medium"),
+                "due_at": t.get("due_at", ""),
+                "contact_id": t.get("contact_id", ""),
+            })
+    if not priorities and unread > 0:
+        priorities.append({
+            "type": "inbox_unread",
+            "id": "",
+            "title": f"Review {unread} unread message{'s' if unread != 1 else ''} in your inbox",
+            "priority": "medium",
+            "due_at": "",
+            "contact_id": "",
+        })
+
+    # Day mood
+    workload_score = tasks_overdue * 2 + tasks_due_today + (1 if unread > 5 else 0) + (1 if approvals_pending > 0 else 0)
+    if workload_score >= 8:
+        mood = "busy"
+        mood_label = "Busy day ahead"
+    elif workload_score >= 3:
+        mood = "steady"
+        mood_label = "Steady pace today"
+    else:
+        mood = "light"
+        mood_label = "Light day — great time to prospect"
+
+    # Greeting
+    hour = now.hour
+    if hour < 5 or hour >= 22:
+        tod = "evening"
+        tod_greet = "Working late"
+    elif hour < 12:
+        tod = "morning"
+        tod_greet = "Good morning"
+    elif hour < 17:
+        tod = "afternoon"
+        tod_greet = "Good afternoon"
+    else:
+        tod = "evening"
+        tod_greet = "Good evening"
+
+    today_label = now.strftime("%A, %B %d")
     user_label = ctx.get("name") or (ctx.get("email") or "").split("@")[0] or "there"
+
+    summary_parts = []
+    if tasks_overdue > 0:
+        summary_parts.append(f"{tasks_overdue} overdue task{'s' if tasks_overdue != 1 else ''}")
+    if tasks_due_today > 0:
+        summary_parts.append(f"{tasks_due_today} due today")
+    if unread > 0:
+        summary_parts.append(f"{unread} unread message{'s' if unread != 1 else ''}")
+    if approvals_pending > 0:
+        summary_parts.append(f"{approvals_pending} approval{'s' if approvals_pending != 1 else ''} waiting")
+    summary_str = ", ".join(summary_parts) if summary_parts else "you're all caught up"
+
     greeting = (
-        f"Good day, {user_label}. Here's your {today_label} at a glance: "
-        f"{tasks_count} task{'s' if tasks_count != 1 else ''} due, "
-        f"{unread} unread message{'s' if unread != 1 else ''}, "
-        f"{deals_open} open deal{'s' if deals_open != 1 else ''}, "
-        f"{contacts_total} total contact{'s' if contacts_total != 1 else ''}. "
-        f"What would you like to tackle first?"
+        f"{tod_greet}, {user_label}. Here's your {today_label} at a glance: "
+        f"{summary_str}. {mood_label}."
     )
+
     return {
         "greeting": greeting,
+        "time_of_day": tod,
+        "today_label": today_label,
+        "mood": mood,
+        "mood_label": mood_label,
         "stats": {
-            "tasks_due_today": tasks_count,
+            "tasks_due_today": tasks_due_today,
+            "tasks_overdue": tasks_overdue,
+            "tasks_completed_today": tasks_completed_today,
             "unread_messages": unread,
             "open_deals": deals_open,
+            "open_deals_value": deals_open_value,
             "total_contacts": contacts_total,
+            "stale_contacts": contacts_stale,
+            "approvals_pending": approvals_pending,
         },
-        "user": {"name": user_label, "email": ctx.get("email", "")},
-        "tenant": {"id": ctx["tenant_id"], "name": ctx.get("tenant_name", ""), "plan": ctx.get("plan", "starter")},
+        "priorities": priorities,
+        "user": {"name": user_label, "email": ctx.get("email", ""), "user_id": user_id},
+        "tenant": {
+            "id": tenant_id,
+            "name": ctx.get("tenant_name", ""),
+            "plan": ctx.get("plan", "starter"),
+        },
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHASE 3 — ELARA COMMAND CENTER: Activity Feed + Approval Queue + Integrations
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Crew Activity Feed ──────────────────────────────────────────────────────────
+# Pretty-name + human label mapping for activity feed entries
+_ELARA_TOOL_LABELS = {
+    "contacts.search": ("Searched contacts", "search"),
+    "contacts.get": ("Looked up contact", "search"),
+    "contacts.create": ("Created contact", "create"),
+    "contacts.update": ("Updated contact", "update"),
+    "contacts.sms": ("Sent SMS", "send"),
+    "contacts.email": ("Sent email", "send"),
+    "contacts.note": ("Added note", "note"),
+    "contacts.timeline": ("Viewed timeline", "view"),
+    "tasks.create": ("Created task", "create"),
+    "tasks.complete": ("Completed task", "update"),
+    "tasks.today": ("Checked today's tasks", "view"),
+    "inbox.unread": ("Checked unread inbox", "view"),
+    "inbox.recent": ("Browsed inbox", "view"),
+    "calendar.today": ("Checked calendar", "view"),
+    "deals.list": ("Reviewed deals", "view"),
+    "memory.write": ("Saved to memory", "memory"),
+    "memory.search": ("Recalled from memory", "memory"),
+    "activity.log": ("Logged activity", "note"),
+    "llm.chat": ("LLM response", "llm"),
+    "chat.send": ("Chat reply", "llm"),
+    "elara.token.mint": ("Minted service token", "system"),
+    "elara.token.revoke": ("Revoked service token", "system"),
+    "tenant.update": ("Updated tenant settings", "system"),
+    "pending_actions.create": ("Drafted action for approval", "approval"),
+    "pending_actions.approve": ("Action approved & executed", "approval"),
+    "pending_actions.reject": ("Action rejected", "approval"),
+}
+
+
+@api_router.get("/elara/activity")
+async def elara_activity_feed(
+    ctx=Depends(get_elara_caller),
+    limit: int = 50,
+    skip: int = 0,
+    tool: Optional[str] = None,
+    category: Optional[str] = None,
+):
+    """Return the crew activity feed — what Elara (and any external agents on this
+    tenant's service tokens) have been doing. Enriched with friendly labels +
+    category for color-coding in the UI.
+    Optional filters: tool (exact match), category (filter by tool category)."""
+    if limit < 1 or limit > 200:
+        limit = 50
+    if skip < 0:
+        skip = 0
+
+    query = {"tenant_id": ctx["tenant_id"]}
+    if tool:
+        query["tool"] = tool
+
+    items = []
+    cursor = db.elara_audit.find(query).sort("created_at", -1).skip(skip).limit(limit * 2 if category else limit)
+    async for row in cursor:
+        tool_name = row.get("tool", "")
+        label, cat = _ELARA_TOOL_LABELS.get(tool_name, (tool_name.replace(".", " ").title(), "system"))
+        if category and cat != category:
+            continue
+        # Try to extract a "target" — for contact-related tools, look up name
+        target = ""
+        target_id = ""
+        target_type = ""
+        inputs = row.get("inputs", {}) or {}
+        outputs = row.get("outputs", {}) or {}
+        if isinstance(inputs, dict):
+            cid = inputs.get("contact_id") or outputs.get("id") or outputs.get("contact_id") or ""
+            if cid:
+                target_id = str(cid)
+                target_type = "contact"
+                # Best-effort name lookup
+                try:
+                    contact = await db.contacts.find_one({"_id": cid, "tenant_id": ctx["tenant_id"]})
+                    if contact:
+                        target = contact.get("name") or contact.get("email") or contact.get("phone") or ""
+                except Exception:
+                    pass
+        items.append({
+            "id": str(row.get("_id", "")),
+            "tool": tool_name,
+            "label": label,
+            "category": cat,
+            "status": row.get("status", "ok"),
+            "error": row.get("error", ""),
+            "user_id": row.get("user_id", ""),
+            "target_type": target_type,
+            "target_id": target_id,
+            "target_name": target,
+            "created_at": row.get("created_at", ""),
+            "summary": _shorten(_extract_audit_summary(tool_name, inputs, outputs), 140),
+        })
+        if len(items) >= limit:
+            break
+    return {"items": items, "count": len(items)}
+
+
+def _shorten(text: str, n: int) -> str:
+    if not text:
+        return ""
+    s = str(text).strip()
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _extract_audit_summary(tool: str, inputs: dict, outputs: dict) -> str:
+    """Compose a short human-readable summary from inputs/outputs for the feed."""
+    try:
+        if tool == "contacts.search":
+            return f"Query: \"{inputs.get('q', '')}\""
+        if tool == "contacts.create":
+            return f"{inputs.get('name', '')} ({inputs.get('email', '') or inputs.get('phone', '')})"
+        if tool == "contacts.note":
+            return inputs.get("body", "")
+        if tool == "contacts.sms":
+            return inputs.get("body", "")
+        if tool == "contacts.email":
+            return inputs.get("subject", "") or inputs.get("body", "")
+        if tool == "tasks.create":
+            return inputs.get("title", "")
+        if tool == "tasks.complete":
+            return outputs.get("title", "") or "Task marked complete"
+        if tool == "memory.write":
+            return f"{inputs.get('kind', '')}/{inputs.get('key', '')}: {str(inputs.get('value',''))[:60]}"
+        if tool == "llm.chat" or tool == "chat.send":
+            msgs = inputs.get("messages") or []
+            if msgs and isinstance(msgs, list):
+                last_user = next((m.get("content", "") for m in reversed(msgs) if m.get("role") == "user"), "")
+                return last_user
+            return inputs.get("user_message", "")
+        if tool == "pending_actions.create":
+            return inputs.get("summary", "") or inputs.get("kind", "")
+        if tool == "pending_actions.approve" or tool == "pending_actions.reject":
+            return outputs.get("summary", "") or inputs.get("action_id", "")
+        return ""
+    except Exception:
+        return ""
+
+
+# ── Approval Queue ──────────────────────────────────────────────────────────────
+SUPPORTED_PENDING_KINDS = (
+    "send_sms", "send_email", "create_task", "add_note", "update_contact", "create_deal", "generic"
+)
+
+
+class PendingActionCreate(BaseModel):
+    kind: str = Field(..., max_length=40)
+    summary: str = Field(..., min_length=1, max_length=300)
+    payload: dict = Field(default_factory=dict)
+    target_contact_id: Optional[str] = Field(default="", max_length=50)
+    proposed_by: Optional[str] = Field(default="elara", max_length=30)
+    rationale: Optional[str] = Field(default="", max_length=2000)
+    expires_at: Optional[str] = Field(default="", max_length=40)
+
+    @field_validator("kind")
+    @classmethod
+    def validate_kind(cls, v):
+        if v not in SUPPORTED_PENDING_KINDS:
+            raise ValueError(f"kind must be one of: {', '.join(SUPPORTED_PENDING_KINDS)}")
+        return v
+
+
+async def _enrich_pending_action(row: dict, tenant_id: str) -> dict:
+    """Convert a raw pending_action doc into the API shape with contact name lookup."""
+    target_name = ""
+    target_contact_id = row.get("target_contact_id", "") or ""
+    if target_contact_id:
+        try:
+            contact = await db.contacts.find_one({"_id": target_contact_id, "tenant_id": tenant_id})
+            if contact:
+                target_name = contact.get("name") or contact.get("email") or contact.get("phone") or ""
+        except Exception:
+            pass
+    return {
+        "id": str(row.get("_id", "")),
+        "kind": row.get("kind", ""),
+        "summary": row.get("summary", ""),
+        "rationale": row.get("rationale", ""),
+        "payload": row.get("payload", {}) or {},
+        "status": row.get("status", "pending"),
+        "proposed_by": row.get("proposed_by", "elara"),
+        "target_contact_id": target_contact_id,
+        "target_contact_name": target_name,
+        "created_at": row.get("created_at", ""),
+        "expires_at": row.get("expires_at", ""),
+        "decided_at": row.get("decided_at", ""),
+        "decided_by_user_id": row.get("decided_by_user_id", ""),
+        "execution_result": row.get("execution_result", {}) or {},
+    }
+
+
+@api_router.get("/elara/approvals")
+async def elara_list_approvals(
+    ctx=Depends(get_elara_caller),
+    status: str = "pending",
+    limit: int = 50,
+    skip: int = 0,
+):
+    """List Elara-proposed actions awaiting (or past) user approval.
+    Statuses: pending | approved | rejected | executed | failed | all"""
+    if limit < 1 or limit > 200:
+        limit = 50
+    if skip < 0:
+        skip = 0
+    query = {"tenant_id": ctx["tenant_id"]}
+    if status != "all":
+        query["status"] = status
+    items = []
+    cursor = db.elara_pending_actions.find(query).sort("created_at", -1).skip(skip).limit(limit)
+    async for row in cursor:
+        items.append(await _enrich_pending_action(row, ctx["tenant_id"]))
+    total = await db.elara_pending_actions.count_documents(query)
+    pending_count = await db.elara_pending_actions.count_documents({
+        "tenant_id": ctx["tenant_id"], "status": "pending",
+    })
+    return {"items": items, "count": len(items), "total": total, "pending_count": pending_count}
+
+
+@api_router.post("/elara/approvals")
+async def elara_create_approval(data: PendingActionCreate, ctx=Depends(get_elara_caller)):
+    """Create a new pending action — typically called by an external Elara agent
+    via service-token bearer auth when it wants user approval before executing."""
+    doc_id = str(uuid.uuid4()).replace("-", "")
+    doc = {
+        "_id": doc_id,
+        "tenant_id": ctx["tenant_id"],
+        "kind": data.kind,
+        "summary": data.summary,
+        "rationale": data.rationale or "",
+        "payload": data.payload or {},
+        "target_contact_id": data.target_contact_id or "",
+        "proposed_by": data.proposed_by or "elara",
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "expires_at": data.expires_at or "",
+        "created_by_user_id": ctx["user_id"],
+    }
+    await db.elara_pending_actions.insert_one(doc)
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "pending_actions.create",
+                    inputs={"kind": data.kind, "summary": data.summary, "target_contact_id": data.target_contact_id},
+                    outputs={"id": doc_id}, status="ok")
+    return await _enrich_pending_action(doc, ctx["tenant_id"])
+
+
+async def _execute_pending_action(doc: dict, ctx: dict) -> dict:
+    """Dispatch the action to its handler. Returns {executed, result, error?}.
+    Reuses existing tool endpoints' logic where possible."""
+    kind = doc.get("kind", "")
+    payload = doc.get("payload", {}) or {}
+    tenant_id = ctx["tenant_id"]
+    user_id = ctx["user_id"]
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        if kind == "create_task":
+            task_id = str(uuid.uuid4()).replace("-", "")
+            task_doc = {
+                "_id": task_id,
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "title": str(payload.get("title", ""))[:300] or "Untitled task",
+                "description": str(payload.get("description", ""))[:5000],
+                "due_at": str(payload.get("due_at", ""))[:30],
+                "priority": payload.get("priority", "medium") if payload.get("priority") in ("high", "medium", "low") else "medium",
+                "status": "pending",
+                "contact_id": doc.get("target_contact_id", "") or payload.get("contact_id", ""),
+                "created_at": now,
+            }
+            await db.tasks.insert_one(task_doc)
+            return {"executed": True, "result": {"task_id": task_id, "title": task_doc["title"]}}
+        elif kind == "add_note":
+            cid = doc.get("target_contact_id", "") or payload.get("contact_id", "")
+            if not cid:
+                return {"executed": False, "error": "contact_id required for add_note"}
+            note_id = str(uuid.uuid4()).replace("-", "")
+            await db.activities.insert_one({
+                "_id": note_id,
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "contact_id": cid,
+                "activity_type": "note",
+                "description": str(payload.get("body", ""))[:5000],
+                "created_at": now,
+            })
+            return {"executed": True, "result": {"activity_id": note_id}}
+        elif kind == "update_contact":
+            cid = doc.get("target_contact_id", "") or payload.get("contact_id", "")
+            if not cid:
+                return {"executed": False, "error": "contact_id required for update_contact"}
+            updates = payload.get("updates", {}) or {}
+            allowed = {"name", "email", "phone", "tags", "notes", "stage", "rent_budget", "unit_preferences"}
+            clean_updates = {k: v for k, v in updates.items() if k in allowed}
+            if not clean_updates:
+                return {"executed": False, "error": "no valid fields to update"}
+            clean_updates["updated_at"] = now
+            await db.contacts.update_one(
+                {"_id": cid, "tenant_id": tenant_id},
+                {"$set": clean_updates},
+            )
+            return {"executed": True, "result": {"contact_id": cid, "fields_updated": list(clean_updates.keys())}}
+        elif kind in ("send_sms", "send_email", "create_deal", "generic"):
+            # Phase 3 MVP: log + mark executed but don't actually fire (user must use
+            # the explicit tool endpoint or contact UI). Future work: dispatch into
+            # the matching tool handler.
+            return {"executed": True, "result": {"note": "Action recorded. Use the corresponding tool to actually send/execute."}}
+        else:
+            return {"executed": False, "error": f"unsupported kind: {kind}"}
+    except Exception as e:
+        logger.warning(f"_execute_pending_action failed for kind={kind}: {e}")
+        return {"executed": False, "error": str(e)[:300]}
+
+
+@api_router.post("/elara/approvals/{action_id}/approve")
+async def elara_approve(action_id: str, ctx=Depends(get_elara_caller)):
+    """Approve & execute a pending action."""
+    doc = await db.elara_pending_actions.find_one({"_id": action_id, "tenant_id": ctx["tenant_id"]})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Pending action not found")
+    if doc.get("status") != "pending":
+        raise HTTPException(status_code=400, detail=f"Action already {doc.get('status')}; cannot re-approve")
+    now = datetime.now(timezone.utc).isoformat()
+    exec_result = await _execute_pending_action(doc, ctx)
+    new_status = "executed" if exec_result.get("executed") else "failed"
+    update = {
+        "status": new_status,
+        "decided_at": now,
+        "decided_by_user_id": ctx["user_id"],
+        "execution_result": exec_result,
+    }
+    await db.elara_pending_actions.update_one({"_id": action_id}, {"$set": update})
+    refreshed = await db.elara_pending_actions.find_one({"_id": action_id})
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "pending_actions.approve",
+                    inputs={"action_id": action_id, "kind": doc.get("kind", "")},
+                    outputs={"status": new_status, "summary": doc.get("summary", "")},
+                    status=("ok" if exec_result.get("executed") else "error"),
+                    error=exec_result.get("error", ""))
+    return await _enrich_pending_action(refreshed, ctx["tenant_id"])
+
+
+@api_router.post("/elara/approvals/{action_id}/reject")
+async def elara_reject(action_id: str, ctx=Depends(get_elara_caller)):
+    """Reject (discard) a pending action."""
+    doc = await db.elara_pending_actions.find_one({"_id": action_id, "tenant_id": ctx["tenant_id"]})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Pending action not found")
+    if doc.get("status") != "pending":
+        raise HTTPException(status_code=400, detail=f"Action already {doc.get('status')}; cannot reject")
+    now = datetime.now(timezone.utc).isoformat()
+    update = {
+        "status": "rejected",
+        "decided_at": now,
+        "decided_by_user_id": ctx["user_id"],
+    }
+    await db.elara_pending_actions.update_one({"_id": action_id}, {"$set": update})
+    refreshed = await db.elara_pending_actions.find_one({"_id": action_id})
+    await audit_log(ctx["tenant_id"], ctx["user_id"], "pending_actions.reject",
+                    inputs={"action_id": action_id, "kind": doc.get("kind", "")},
+                    outputs={"summary": doc.get("summary", "")}, status="ok")
+    return await _enrich_pending_action(refreshed, ctx["tenant_id"])
+
+
+# ── Tool surface: let external Elara agents create pending actions ────────────
+@api_router.post("/elara/tools/pending_actions/create")
+async def elara_tool_pending_action_create(data: PendingActionCreate, ctx=Depends(get_elara_caller)):
+    """Same as POST /api/elara/approvals — exposed under /tools/ so the LLM agent
+    discovers it through GET /api/elara/tools."""
+    return await elara_create_approval(data, ctx)
+
+
+# ── Integrations Hub ───────────────────────────────────────────────────────────
+# Curated catalog of suggested integrations, tagged by industry. This is static
+# for Phase 3 MVP — future work could pull from a dynamic Elara recommendation API.
+_INTEGRATION_CATALOG = [
+    # ─── Already connected / native to PropFlow ───
+    {"id": "twilio_sms", "name": "Twilio SMS", "category": "communications", "icon": "MessageSquare",
+     "description": "Send & receive SMS to/from leads and tenants. Includes phone-number matching and inbox threading.",
+     "industries": ["real_estate_leasing", "investor_acquisitions", "b2b_automation"],
+     "use_cases": ["lead_followup", "tenant_communication"],
+     "native": True, "status_check": "twilio",
+     "setup_url": "/settings#integrations-twilio",
+     "requires_keys": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER"]},
+    {"id": "google_sheets", "name": "Google Sheets — Brokerage Pre-Lease Sheet",
+     "category": "data_sync", "icon": "Table",
+     "description": "Auto-sync your team's active listings into a shared 'Live Listings' Sheet. Refreshed every 60 seconds.",
+     "industries": ["real_estate_leasing"],
+     "use_cases": ["broker_collaboration", "listing_distribution"],
+     "native": True, "status_check": "google_sheets",
+     "setup_url": "/settings#integrations-google-sheets",
+     "requires_keys": ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"],
+     "plan_required": "brokerage_pro"},
+    {"id": "emergent_llm", "name": "Emergent Universal LLM Key",
+     "category": "ai", "icon": "Sparkles",
+     "description": "GPT-5.2 via the Emergent Universal Key — powers Elara's chat, summaries, and the OpenAI-compatible bridge for CrewAI agents.",
+     "industries": ["real_estate_leasing", "investor_acquisitions", "b2b_automation"],
+     "use_cases": ["ai_assistant", "agent_swarm"],
+     "native": True, "status_check": "emergent_llm",
+     "setup_url": "/settings#integrations-emergent",
+     "requires_keys": ["EMERGENT_LLM_KEY"]},
+    {"id": "elara_replit", "name": "Elara on Replit (CrewAI swarm)",
+     "category": "ai", "icon": "Bot",
+     "description": "Connect the Elara agent swarm hosted on Replit. Mint a service token in Settings → Integrations → Elara Service Tokens.",
+     "industries": ["real_estate_leasing", "investor_acquisitions", "b2b_automation"],
+     "use_cases": ["agent_swarm", "automation"],
+     "native": True, "status_check": "elara_token",
+     "setup_url": "/settings#integrations-elara"},
+
+    # ─── Brevo Email (configured but optional) ───
+    {"id": "brevo", "name": "Brevo (Sendinblue) Email",
+     "category": "communications", "icon": "Mail",
+     "description": "Send transactional email to leads & tenants. Required for outbound email automation and renewal campaigns.",
+     "industries": ["real_estate_leasing", "investor_acquisitions", "b2b_automation"],
+     "use_cases": ["email_campaigns", "lead_followup"],
+     "native": True, "status_check": "brevo",
+     "setup_url": "/settings#integrations-brevo",
+     "requires_keys": ["BREVO_API_KEY"]},
+
+    # ─── Real Estate Leasing Suggestions ───
+    {"id": "zillow_premier", "name": "Zillow Premier Agent",
+     "category": "lead_source", "icon": "Home",
+     "description": "Ingest leads from Zillow, Trulia, and HotPads listings directly into your contacts + lease applications pipeline.",
+     "industries": ["real_estate_leasing"],
+     "use_cases": ["lead_generation", "listing_sync"],
+     "native": False,
+     "setup_url": "https://www.zillow.com/agent-resources/agent-tools/premier-agent/",
+     "requires_keys": ["ZILLOW_PARTNER_KEY"]},
+    {"id": "followupboss_bridge", "name": "FollowUpBoss Migration Bridge",
+     "category": "lead_source", "icon": "ArrowRightLeft",
+     "description": "One-way import from FollowUpBoss — contacts, deals, smart lists, and email/SMS history.",
+     "industries": ["real_estate_leasing"],
+     "use_cases": ["migration", "lead_sync"],
+     "native": False, "coming_soon": True,
+     "setup_url": "https://www.followupboss.com/api/"},
+    {"id": "rentvine", "name": "RentVine Property Sync",
+     "category": "property_mgmt", "icon": "Building2",
+     "description": "Bidirectional unit & lease sync with RentVine — keep occupancy, rent rolls, and renewals aligned.",
+     "industries": ["real_estate_leasing"],
+     "use_cases": ["property_management", "occupancy_tracking"],
+     "native": False,
+     "setup_url": "https://www.rentvine.com/integrations",
+     "requires_keys": ["RENTVINE_API_KEY"]},
+    {"id": "transunion_smartmove", "name": "TransUnion SmartMove",
+     "category": "screening", "icon": "ShieldCheck",
+     "description": "Credit + criminal + eviction screening for applicants. Trigger automatically when a deal hits 'Application Submitted'.",
+     "industries": ["real_estate_leasing"],
+     "use_cases": ["tenant_screening"],
+     "native": False,
+     "setup_url": "https://www.mysmartmove.com/SmartMove/landlords-app.page"},
+    {"id": "applyconnect", "name": "ApplyConnect (CIC)",
+     "category": "screening", "icon": "FileCheck",
+     "description": "Applicant-paid tenant screening with TransUnion. Embeddable application link sent via Elara on stage change.",
+     "industries": ["real_estate_leasing"],
+     "use_cases": ["tenant_screening", "application_intake"],
+     "native": False,
+     "setup_url": "https://www.applyconnect.com/"},
+    {"id": "docusign", "name": "DocuSign Lease E-Sign",
+     "category": "documents", "icon": "FileSignature",
+     "description": "Send lease packets for e-signature, auto-tag with applicant info, and persist signed PDFs to the contact file vault.",
+     "industries": ["real_estate_leasing", "investor_acquisitions"],
+     "use_cases": ["lease_signing", "document_management"],
+     "native": False,
+     "setup_url": "https://developers.docusign.com/",
+     "requires_keys": ["DOCUSIGN_INTEGRATION_KEY"]},
+    {"id": "showmojo", "name": "ShowMojo Tour Scheduler",
+     "category": "scheduling", "icon": "CalendarClock",
+     "description": "Self-serve showings with lockbox codes. Two-way sync of confirmed tours into your calendar + activity timeline.",
+     "industries": ["real_estate_leasing"],
+     "use_cases": ["tour_scheduling"],
+     "native": False,
+     "setup_url": "https://www.showmojo.com/"},
+
+    # ─── Investor Acquisitions Suggestions ───
+    {"id": "propstream", "name": "PropStream",
+     "category": "data", "icon": "Database",
+     "description": "Skip-trace + ARV + comp data on off-market properties. Save lists into Properties and trigger drip campaigns.",
+     "industries": ["investor_acquisitions"],
+     "use_cases": ["lead_generation", "data_enrichment"],
+     "native": False,
+     "setup_url": "https://www.propstream.com/api"},
+    {"id": "batchskip", "name": "BatchSkipTracing",
+     "category": "data", "icon": "PhoneCall",
+     "description": "Bulk skip-trace owners of investor-target properties. Auto-populate phone/email fields on Contacts.",
+     "industries": ["investor_acquisitions"],
+     "use_cases": ["data_enrichment", "outreach"],
+     "native": False,
+     "setup_url": "https://batchskiptracing.com/"},
+    {"id": "privy", "name": "Privy Investor MLS",
+     "category": "data", "icon": "TrendingUp",
+     "description": "Real-time MLS data filtered for investor metrics — flips, BRRRR, distressed listings, hidden inventory.",
+     "industries": ["investor_acquisitions"],
+     "use_cases": ["deal_sourcing"],
+     "native": False,
+     "setup_url": "https://www.privy.pro/"},
+    {"id": "deal_machine", "name": "DealMachine",
+     "category": "data", "icon": "MapPin",
+     "description": "Drive-for-dollars + direct mail. Sync 'driving lists' to PropFlow as Properties + queued outreach Tasks.",
+     "industries": ["investor_acquisitions"],
+     "use_cases": ["lead_generation"],
+     "native": False,
+     "setup_url": "https://www.dealmachine.com/"},
+    {"id": "ymf_capital", "name": "YMF / Hard Money Lender API",
+     "category": "finance", "icon": "Landmark",
+     "description": "Pre-qualify investor deals against hard-money lender criteria & generate term sheets within the deal record.",
+     "industries": ["investor_acquisitions"],
+     "use_cases": ["financing"],
+     "native": False, "coming_soon": True,
+     "setup_url": "#"},
+
+    # ─── B2B Automation Suggestions ───
+    {"id": "hubspot", "name": "HubSpot CRM Bridge",
+     "category": "crm", "icon": "Workflow",
+     "description": "Sync companies, contacts, and deals between HubSpot and PropFlow. Useful when you operate B2B sales alongside your brokerage.",
+     "industries": ["b2b_automation", "investor_acquisitions"],
+     "use_cases": ["crm_sync"],
+     "native": False,
+     "setup_url": "https://developers.hubspot.com/"},
+    {"id": "salesforce", "name": "Salesforce Connector",
+     "category": "crm", "icon": "Cloud",
+     "description": "Two-way sync to Salesforce Sales Cloud — accounts, opportunities, activities. SOQL queries via Elara tool surface.",
+     "industries": ["b2b_automation"],
+     "use_cases": ["crm_sync"],
+     "native": False,
+     "setup_url": "https://developer.salesforce.com/"},
+    {"id": "n8n", "name": "n8n Workflow Automation",
+     "category": "automation", "icon": "GitBranch",
+     "description": "Self-host n8n and call PropFlow's Elara tool endpoints. Build no-code automations (Slack alerts on hot leads, daily digests, etc.).",
+     "industries": ["b2b_automation", "real_estate_leasing"],
+     "use_cases": ["workflow_automation"],
+     "native": False,
+     "setup_url": "https://docs.n8n.io/"},
+    {"id": "zapier", "name": "Zapier App",
+     "category": "automation", "icon": "Zap",
+     "description": "Connect PropFlow to 6,000+ Zapier apps. Trigger workflows on new contacts, stage changes, or task completion.",
+     "industries": ["b2b_automation", "real_estate_leasing", "investor_acquisitions"],
+     "use_cases": ["workflow_automation"],
+     "native": False, "coming_soon": True,
+     "setup_url": "https://zapier.com/apps"},
+    {"id": "slack", "name": "Slack Notifications",
+     "category": "communications", "icon": "Hash",
+     "description": "Send daily briefings, hot-lead alerts, and Elara crew activity to a Slack channel. Mention your team on overdue tasks.",
+     "industries": ["b2b_automation", "real_estate_leasing", "investor_acquisitions"],
+     "use_cases": ["team_notifications"],
+     "native": False,
+     "setup_url": "https://api.slack.com/messaging/webhooks",
+     "requires_keys": ["SLACK_WEBHOOK_URL"]},
+    {"id": "linear", "name": "Linear Issue Sync",
+     "category": "productivity", "icon": "Square",
+     "description": "Auto-create Linear issues from Elara approvals or maintenance tickets. Close-loop the brokerage ops backlog.",
+     "industries": ["b2b_automation"],
+     "use_cases": ["task_management"],
+     "native": False,
+     "setup_url": "https://developers.linear.app/"},
+    {"id": "notion", "name": "Notion Knowledge Base",
+     "category": "knowledge", "icon": "BookOpen",
+     "description": "Index your Notion pages into Elara's memory so the agent can answer market-specific or SOP questions.",
+     "industries": ["b2b_automation", "real_estate_leasing"],
+     "use_cases": ["knowledge_management"],
+     "native": False, "coming_soon": True,
+     "setup_url": "https://developers.notion.com/"},
+    {"id": "calendly", "name": "Calendly Booking",
+     "category": "scheduling", "icon": "Calendar",
+     "description": "Sync Calendly events into the contact timeline and auto-create follow-up tasks 24h post-meeting.",
+     "industries": ["b2b_automation", "real_estate_leasing"],
+     "use_cases": ["scheduling"],
+     "native": False,
+     "setup_url": "https://developer.calendly.com/"},
+]
+
+
+async def _check_integration_status(integration: dict, ctx: dict) -> dict:
+    """For native integrations, check the actual connection status. Returns
+    {connected: bool, detail: str}."""
+    status_key = integration.get("status_check", "")
+    if not status_key:
+        return {"connected": False, "detail": "not_configured"}
+    try:
+        if status_key == "twilio":
+            sid = os.environ.get("TWILIO_ACCOUNT_SID") or ""
+            tok = os.environ.get("TWILIO_AUTH_TOKEN") or ""
+            num = os.environ.get("TWILIO_PHONE_NUMBER") or ""
+            ok = bool(sid and tok and num)
+            return {"connected": ok, "detail": f"Phone: {num}" if ok else "Credentials missing in .env"}
+        elif status_key == "google_sheets":
+            # Check if this tenant has a stored OAuth token
+            try:
+                doc = await db.tenant_google_tokens.find_one({"tenant_id": ctx["tenant_id"]})
+                if doc and doc.get("access_token"):
+                    return {"connected": True, "detail": f"Sheet ID: {doc.get('sheet_id','')[:12]}…" if doc.get("sheet_id") else "OAuth connected"}
+            except Exception:
+                pass
+            return {"connected": False, "detail": "Not connected"}
+        elif status_key == "emergent_llm":
+            ok = bool(os.environ.get("EMERGENT_LLM_KEY") or os.environ.get("EMERGENT_UNIVERSAL_KEY"))
+            return {"connected": ok, "detail": "Universal key active" if ok else "Key not set"}
+        elif status_key == "elara_token":
+            cnt = await db.elara_service_tokens.count_documents({
+                "tenant_id": ctx["tenant_id"], "revoked_at": {"$in": [None, ""]},
+            })
+            return {"connected": cnt > 0, "detail": f"{cnt} active service token{'s' if cnt != 1 else ''}"}
+        elif status_key == "brevo":
+            ok = bool(os.environ.get("BREVO_API_KEY"))
+            return {"connected": ok, "detail": "API key configured" if ok else "Not configured — emails log locally only"}
+    except Exception as e:
+        logger.warning(f"_check_integration_status({status_key}) failed: {e}")
+    return {"connected": False, "detail": "unknown"}
+
+
+@api_router.get("/elara/integrations")
+async def elara_integrations(ctx=Depends(get_elara_caller), industry: Optional[str] = None):
+    """Return Integrations Hub data:
+      - connected: native integrations that are actually wired up for this tenant
+      - suggested: 6-8 picks filtered by the tenant's industry (or override via ?industry=)
+      - all: full catalog (with status enrichment)
+    """
+    # Resolve industry: query param > tenant.industry > 'real_estate_leasing' default
+    tenant_doc = await db.tenants.find_one({"_id": ctx["tenant_id"]})
+    chosen_industry = (industry or (tenant_doc or {}).get("industry") or "real_estate_leasing")
+
+    enriched = []
+    for integ in _INTEGRATION_CATALOG:
+        copy = dict(integ)
+        if copy.get("native") and copy.get("status_check"):
+            status = await _check_integration_status(integ, ctx)
+            copy["connected"] = status["connected"]
+            copy["status_detail"] = status["detail"]
+        else:
+            copy["connected"] = False
+            copy["status_detail"] = "Available — setup required" if not copy.get("coming_soon") else "Coming soon"
+        enriched.append(copy)
+
+    connected = [i for i in enriched if i.get("connected")]
+    # Suggested: industry-tagged, not connected, not coming-soon, native or popular
+    suggested = [
+        i for i in enriched
+        if not i.get("connected")
+        and not i.get("coming_soon")
+        and chosen_industry in (i.get("industries", []) or [])
+    ][:8]
+    # If empty (rare), fallback to first few non-connected
+    if not suggested:
+        suggested = [i for i in enriched if not i.get("connected") and not i.get("coming_soon")][:6]
+
+    # Industries metadata
+    industries = [
+        {"id": "real_estate_leasing", "label": "Real Estate Leasing", "icon": "Home"},
+        {"id": "investor_acquisitions", "label": "Investor Acquisitions", "icon": "TrendingUp"},
+        {"id": "b2b_automation", "label": "B2B Automation Services", "icon": "Workflow"},
+        {"id": "general", "label": "General / Cross-industry", "icon": "Layers"},
+    ]
+    return {
+        "industry": chosen_industry,
+        "industries": industries,
+        "connected": connected,
+        "suggested": suggested,
+        "all": enriched,
+        "tenant": {
+            "id": ctx["tenant_id"],
+            "name": (tenant_doc or {}).get("name", ""),
+            "plan": (tenant_doc or {}).get("plan", "starter"),
+            "industry": (tenant_doc or {}).get("industry", ""),
+            "use_cases": (tenant_doc or {}).get("use_cases", []),
+        },
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# END PHASE 3 — ELARA COMMAND CENTER
+# ═══════════════════════════════════════════════════════════════════════════════
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

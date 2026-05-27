@@ -87,6 +87,97 @@ export function useRevokeElaraToken() {
   });
 }
 
+// ─── Phase 3: Crew Activity Feed ────────────────────────────────────────────
+export function useElaraActivity({ limit = 50, category, tool } = {}) {
+  return useQuery({
+    queryKey: ['elara', 'activity', { limit, category, tool }],
+    queryFn: async () => {
+      const params = { limit };
+      if (category) params.category = category;
+      if (tool) params.tool = tool;
+      return (await api.get('/elara/activity', { params })).data;
+    },
+    staleTime: 20 * 1000,
+    refetchInterval: 30 * 1000, // gentle background refresh
+  });
+}
+
+// ─── Phase 3: Approval Queue ────────────────────────────────────────────────
+export function useElaraApprovals({ status = 'pending', limit = 50 } = {}) {
+  return useQuery({
+    queryKey: ['elara', 'approvals', { status, limit }],
+    queryFn: async () => (await api.get('/elara/approvals', { params: { status, limit } })).data,
+    staleTime: 15 * 1000,
+    refetchInterval: 30 * 1000,
+  });
+}
+
+export function useApproveElaraAction() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (actionId) => (await api.post(`/elara/approvals/${actionId}/approve`)).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['elara', 'approvals'] });
+      qc.invalidateQueries({ queryKey: ['elara', 'activity'] });
+      qc.invalidateQueries({ queryKey: ['elara', 'briefing'] });
+      qc.invalidateQueries({ queryKey: ['tasks'] });
+    },
+  });
+}
+
+export function useRejectElaraAction() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (actionId) => (await api.post(`/elara/approvals/${actionId}/reject`)).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['elara', 'approvals'] });
+      qc.invalidateQueries({ queryKey: ['elara', 'activity'] });
+      qc.invalidateQueries({ queryKey: ['elara', 'briefing'] });
+    },
+  });
+}
+
+export function useCreateElaraApproval() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body) => (await api.post('/elara/approvals', body)).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['elara', 'approvals'] });
+      qc.invalidateQueries({ queryKey: ['elara', 'briefing'] });
+    },
+  });
+}
+
+// ─── Phase 3: Integrations Hub ──────────────────────────────────────────────
+export function useElaraIntegrations(industry) {
+  return useQuery({
+    queryKey: ['elara', 'integrations', { industry }],
+    queryFn: async () =>
+      (await api.get('/elara/integrations', { params: industry ? { industry } : {} })).data,
+    staleTime: 60 * 1000,
+  });
+}
+
+// ─── Phase 3: Tenant me (used by integrations hub to set industry) ──────────
+export function useTenantMe() {
+  return useQuery({
+    queryKey: ['tenant', 'me'],
+    queryFn: async () => (await api.get('/tenants/me')).data,
+    staleTime: 60 * 1000,
+  });
+}
+
+export function useUpdateTenant() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body) => (await api.put('/tenants/me', body)).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['tenant', 'me'] });
+      qc.invalidateQueries({ queryKey: ['elara', 'integrations'] });
+    },
+  });
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // streamElaraChat — low-level SSE consumer for POST /api/elara/chat
 // Calls onMeta with { conversation_id, user_msg_id, assistant_msg_id, model }
